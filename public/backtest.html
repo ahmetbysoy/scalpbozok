@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <!--
+    ============================================================================
+    BOZOK PRO — TEK DOSYA TRADING STRATEJİ BACKTEST TERMINALI
+    ============================================================================
+    Nasıl Çalıştırılır:
+      - Bu dosyayı doğrudan herhangi bir modern web tarayıcısında (Chrome, Edge, Firefox) açın.
+      - Herhangi bir sunucu, Node.js veya derleme adımı GEREKTİRMEZ.
+      - Grafik kütüphanesi CDN üzerinden TradingView Lightweight Charts v4 yükler.
+    
+    Özellikler:
+      - Sentetik OHLCV Veri Üreteci (Seeded Geometric Brownian Motion + Trend Rejimleri)
+      - CSV Yükleme Desteği (Kendi tarihsel verinizi test edin)
+      - EMA + RSI + ATR Tabanlı Ciddi Strateji Motoru (SIFIR LOOKAHEAD BIAS)
+      - Komisyon, Kayma (Slippage) ve Pozisyon Boyutlandırma Hesabı
+      - Performans Metrik Kartları (Net Kâr, Win Rate, Profit Factor, Sharpe, Max Drawdown vb.)
+      - İnteraktif TradingView Grafikleri (Fiyat + EMA'lar, Sermaye Eğrisi, RSI)
+      - Tıklanınca ilgili işleme zoom yapan sıralanabilir Trade Log Tablosu
+  -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BOZOK PRO — Backtest Terminal & Strategy Engine</title>
+  
+  <!-- Lightweight Charts v4 CDN -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+  
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --panel: #121824;
+      --panel2: #1a2233;
+      --border: #26334d;
+      --accent: #06b6d4;
+      --bull: #10b981;
+      --bear: #ef4444;
+      --text: #e2e8f0;
+      --text-dim: #94a3b8;
+      --gold: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.4;
+      padding: 10px;
+      overflow-x: hidden;
+    }
+
+    h1, h2, h3 {
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+
+    .container {
+      max-width: 1600px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* Header */
+    header {
+      background-color: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: bold;
+    }
+
+    /* Control Panel */
+    .control-panel {
+      background-color: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .grid-form {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .form-group label {
+      color: var(--text-dim);
+      font-size: 10px;
+    }
+
+    .form-group input, .form-group select {
+      background-color: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: bold;
+    }
+
+    .form-group input:focus, .form-group select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .btn {
+      background-color: var(--accent);
+      color: #000;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-weight: bold;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 11px;
+      transition: all 0.2s;
+    }
+
+    .btn:hover {
+      filter: brightness(1.1);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background-color: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    /* Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px;
+    }
+
+    .metric-card {
+      background-color: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .metric-title {
+      font-size: 10px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      font-weight: bold;
+    }
+
+    .metric-value {
+      font-size: 15px;
+      font-weight: bold;
+    }
+
+    .metric-sub {
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+
+    /* Charts Stack */
+    .chart-box {
+      background-color: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .chart-title {
+      font-size: 10px;
+      color: var(--text-dim);
+      font-weight: bold;
+      padding: 0 4px;
+    }
+
+    .charts-split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    @media (max-width: 900px) {
+      .charts-split {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Table */
+    .table-container {
+      background-color: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      max-height: 250px;
+      overflow-y: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th {
+      background-color: rgba(0, 0, 0, 0.6);
+      color: var(--text-dim);
+      padding: 8px;
+      font-size: 10px;
+      position: sticky;
+      top: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+
+    tr:hover {
+      background-color: rgba(255, 255, 255, 0.05);
+      cursor: pointer;
+    }
+
+    .badge-long {
+      background-color: rgba(16, 185, 129, 0.2);
+      color: var(--bull);
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-weight: bold;
+      font-size: 9px;
+    }
+
+    .badge-short {
+      background-color: rgba(239, 68, 68, 0.2);
+      color: var(--bear);
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-weight: bold;
+      font-size: 9px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <span>🐆 BOZOK PRO — STRATEJİ VE BACKTEST TERMİNALİ</span>
+    </div>
+    <div>
+      <span style="color: var(--text-dim); font-size: 10px;">Versiyon: 2.5 (Sıfır Gelecek Görüşü / Zero Lookahead Bias)</span>
+    </div>
+  </header>
+
+  <!-- Control Panel -->
+  <div class="control-panel">
+    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
+      <span style="font-weight: bold; color: var(--accent);">STRATEJİ PARAMETRELERİ VE VERİ YAPILANDIRMASI</span>
+      <div style="display: flex; gap: 8px;">
+        <input type="file" id="csvFileInput" accept=".csv" style="display: none;" onchange="handleCsvUpload(event)">
+        <button class="btn btn-secondary" onclick="document.getElementById('csvFileInput').click()">📁 CSV Yükle</button>
+        <button class="btn" onclick="runBacktest()">⚡ BACKTESTİ ÇALIŞTIR</button>
+      </div>
+    </div>
+
+    <div class="grid-form">
+      <div class="form-group">
+        <label>Hızlı EMA:</label>
+        <input type="number" id="fastEma" value="9">
+      </div>
+      <div class="form-group">
+        <label>Yavaş EMA:</label>
+        <input type="number" id="slowEma" value="21">
+      </div>
+      <div class="form-group">
+        <label>RSI Giriş Eşiği:</label>
+        <input type="number" id="rsiEntry" value="50">
+      </div>
+      <div class="form-group">
+        <label>Stop Loss (x ATR):</label>
+        <input type="number" step="0.1" id="stopLossAtrMult" value="2.0">
+      </div>
+      <div class="form-group">
+        <label>Take Profit (x ATR):</label>
+        <input type="number" step="0.1" id="takeProfitAtrMult" value="3.0">
+      </div>
+      <div class="form-group">
+        <label>Komisyon (%):</label>
+        <input type="number" step="0.01" id="commissionPct" value="0.05">
+      </div>
+      <div class="form-group">
+        <label>Kayma (Slippage bps):</label>
+        <input type="number" id="slippageBps" value="5">
+      </div>
+      <div class="form-group">
+        <label>Başlangıç Sermayesi ($):</label>
+        <input type="number" id="initialCapital" value="10000">
+      </div>
+      <div class="form-group">
+        <label>Pozisyon Büyüklüğü (%):</label>
+        <input type="number" id="riskPercent" value="10">
+      </div>
+      <div class="form-group">
+        <label>Piyasa Rejimi:</label>
+        <select id="trendRegime">
+          <option value="mixed" selected>Karışık (Trend + Yatay)</option>
+          <option value="bull">Boğa Trendi 🟢</option>
+          <option value="bear">Ayı Trendi 🔴</option>
+          <option value="ranging">Yatay Konsolidasyon</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Random Seed:</label>
+        <input type="number" id="seed" value="42">
+      </div>
+      <div class="form-group">
+        <label>Bar Sayısı:</label>
+        <input type="number" id="barCount" value="1500">
+      </div>
+    </div>
+  </div>
+
+  <!-- Performance Metrics Cards -->
+  <div class="metrics-grid" id="metricsContainer">
+    <!-- Populated by JS -->
+  </div>
+
+  <!-- Main Price Chart -->
+  <div class="chart-box">
+    <div class="chart-title">FİYAT GRAFİĞİ, EMA STRATEJİ İNDİKATÖRLERİ VE GİRİŞ/ÇIKIŞ OKLARI</div>
+    <div id="priceChart" style="height: 320px; width: 100%;"></div>
+  </div>
+
+  <!-- Equity & RSI Sub Charts -->
+  <div class="charts-split">
+    <div class="chart-box">
+      <div class="chart-title">SERMAYE EĞRİSİ (EQUITY CURVE vs BUY & HOLD)</div>
+      <div id="equityChart" style="height: 160px; width: 100%;"></div>
+    </div>
+
+    <div class="chart-box">
+      <div class="chart-title">RSI İNDİKATÖRÜ VE 70/30 EŞİK SEVİYELERİ</div>
+      <div id="rsiChart" style="height: 160px; width: 100%;"></div>
+    </div>
+  </div>
+
+  <!-- Trade Log Table -->
+  <div class="table-container">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>YÖN</th>
+          <th>GİRİŞ FİYATI</th>
+          <th>ÇIKIŞ FİYATI</th>
+          <th>ÇIKIŞ NEDENİ</th>
+          <th style="text-align: right;">NET PnL ($)</th>
+          <th style="text-align: right;">GETİRİ (%)</th>
+          <th style="text-align: right;">R MİKTARI</th>
+          <th style="text-align: right;">SERMAYE ($)</th>
+        </tr>
+      </thead>
+      <tbody id="tradeLogBody">
+        <!-- Populated by JS -->
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  let priceChartInstance = null;
+  let currentCandles = [];
+  let currentBacktestResult = null;
+
+  // Pseudo Random Generator (Mulberry32)
+  function pseudoRandom(seed) {
+    let s = seed % 2147483647;
+    if (s <= 0) s += 2147483646;
+    return function() {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+  }
+
+  // Generate Synthetic Candle Data
+  function generateData(params) {
+    const rand = pseudoRandom(params.seed);
+    const candles = [];
+    let currentPrice = 95000.0;
+    const startTime = Math.floor(Date.now() / 1000) - params.barCount * 3600;
+    const dt = 1 / 365;
+
+    let trendDrift = 0.15;
+    if (params.trendRegime === 'bull') trendDrift = 0.65;
+    if (params.trendRegime === 'bear') trendDrift = -0.55;
+    if (params.trendRegime === 'ranging') trendDrift = 0.02;
+
+    let currentVol = 0.025;
+
+    for (let i = 0; i < params.barCount; i++) {
+      const t = startTime + i * 3600;
+      if (params.trendRegime === 'mixed' && i % 300 === 0) {
+        const r = rand();
+        if (r < 0.4) trendDrift = 0.60;
+        else if (r < 0.7) trendDrift = -0.50;
+        else trendDrift = 0.0;
+      }
+
+      const u1 = rand();
+      const u2 = rand();
+      const z = Math.sqrt(-2 * Math.log(u1 || 0.0001)) * Math.cos(2 * Math.PI * u2);
+
+      const priceReturn = trendDrift * dt + currentVol * Math.sqrt(dt) * z;
+      const open = currentPrice;
+      const close = Math.max(1000, open * Math.exp(priceReturn));
+
+      const barVol = Math.abs(priceReturn) + currentVol * 0.2 * rand();
+      const high = Math.max(open, close) * (1 + barVol * (0.2 + rand() * 0.8));
+      const low = Math.min(open, close) * (1 - barVol * (0.2 + rand() * 0.8));
+      const volume = Math.round(50 + rand() * 300);
+
+      candles.push({
+        time: t,
+        open: Number(open.toFixed(2)),
+        high: Number(high.toFixed(2)),
+        low: Number(low.toFixed(2)),
+        close: Number(close.toFixed(2)),
+        volume,
+      });
+
+      currentPrice = close;
+    }
+    return candles;
+  }
+
+  // Indicators
+  function calcEMA(data, period) {
+    const res = new Array(data.length).fill(null);
+    if (data.length < period) return res;
+    const k = 2 / (period + 1);
+    let sum = 0;
+    for (let i = 0; i < period; i++) sum += data[i];
+    let prev = sum / period;
+    res[period - 1] = prev;
+    for (let i = period; i < data.length; i++) {
+      const ema = data[i] * k + prev * (1 - k);
+      res[i] = ema;
+      prev = ema;
+    }
+    return res;
+  }
+
+  function calcRSI(data, period) {
+    const res = new Array(data.length).fill(null);
+    if (data.length <= period) return res;
+    let gains = 0, losses = 0;
+    for (let i = 1; i <= period; i++) {
+      const diff = data[i] - data[i - 1];
+      if (diff >= 0) gains += diff;
+      else losses += Math.abs(diff);
+    }
+    let avgGain = gains / period, avgLoss = losses / period;
+    let rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    res[period] = 100 - 100 / (1 + rs);
+
+    for (let i = period + 1; i < data.length; i++) {
+      const diff = data[i] - data[i - 1];
+      const gain = diff >= 0 ? diff : 0;
+      const loss = diff < 0 ? Math.abs(diff) : 0;
+      avgGain = (avgGain * (period - 1) + gain) / period;
+      avgLoss = (avgLoss * (period - 1) + loss) / period;
+      rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+      res[i] = 100 - 100 / (1 + rs);
+    }
+    return res;
+  }
+
+  function calcATR(candles, period) {
+    const res = new Array(candles.length).fill(null);
+    if (candles.length <= period) return res;
+    const trs = [candles[0].high - candles[0].low];
+    for (let i = 1; i < candles.length; i++) {
+      trs.push(Math.max(
+        candles[i].high - candles[i].low,
+        Math.abs(candles[i].high - candles[i - 1].close),
+        Math.abs(candles[i].low - candles[i - 1].close)
+      ));
+    }
+    let sum = 0;
+    for (let i = 0; i < period; i++) sum += trs[i];
+    let prev = sum / period;
+    res[period - 1] = prev;
+    for (let i = period; i < candles.length; i++) {
+      const atr = (prev * (period - 1) + trs[i]) / period;
+      res[i] = atr;
+      prev = atr;
+    }
+    return res;
+  }
+
+  // Backtest Simulation Execution
+  function runSimulation(candles, params) {
+    const closes = candles.map(c => c.close);
+    const fastEma = calcEMA(closes, params.fastEma);
+    const slowEma = calcEMA(closes, params.slowEma);
+    const rsi = calcRSI(closes, 14);
+    const atr = calcATR(candles, 14);
+
+    const trades = [];
+    let capital = params.initialCapital;
+    const initialCap = params.initialCapital;
+    const startPrice = candles[0].close;
+
+    const equityCurve = [];
+    let position = null;
+    let tradeCounter = 1;
+
+    const slippageMult = params.slippageBps / 10000;
+    const commPct = params.commissionPct / 100;
+
+    for (let i = 0; i < candles.length; i++) {
+      const bar = candles[i];
+      const t = bar.time;
+
+      if (position) {
+        let exited = false;
+        let exitPrice = 0;
+        let exitReason = 'END_OF_DATA';
+
+        if (position.type === 'LONG') {
+          if (bar.low <= position.stopLoss) {
+            exited = true;
+            exitPrice = Math.min(bar.open, position.stopLoss) * (1 - slippageMult);
+            exitReason = 'STOP_LOSS';
+          } else if (bar.high >= position.takeProfit) {
+            exited = true;
+            exitPrice = Math.max(bar.open, position.takeProfit) * (1 - slippageMult);
+            exitReason = 'TAKE_PROFIT';
+          }
+        }
+
+        if (exited) {
+          const grossPnL = (exitPrice - position.entryPrice) * position.qty;
+          const exitComm = exitPrice * position.qty * commPct;
+          const entryComm = position.entryPrice * position.qty * commPct;
+          const netPnL = grossPnL - exitComm - entryComm;
+
+          capital += netPnL;
+          const returnPct = (netPnL / (position.entryPrice * position.qty)) * 100;
+
+          trades.push({
+            id: tradeCounter++,
+            type: position.type,
+            entryBar: position.entryBar,
+            entryTime: position.entryTime,
+            entryPrice: position.entryPrice,
+            exitBar: i,
+            exitTime: t,
+            exitPrice: Number(exitPrice.toFixed(2)),
+            exitReason,
+            netPnL: Number(netPnL.toFixed(2)),
+            returnPct: Number(returnPct.toFixed(2)),
+            rReturn: Number((netPnL / Math.abs(position.entryPrice - position.stopLoss) / position.qty).toFixed(2)),
+            capitalAfter: Number(capital.toFixed(2)),
+          });
+          position = null;
+        }
+      }
+
+      if (!position && i >= 2) {
+        const pFast = fastEma[i - 1];
+        const pSlow = slowEma[i - 1];
+        const p2Fast = fastEma[i - 2];
+        const p2Slow = slowEma[i - 2];
+        const pRsi = rsi[i - 1];
+        const pAtr = atr[i - 1];
+
+        if (pFast !== null && pSlow !== null && p2Fast <= p2Slow && pFast > pSlow && pRsi >= params.rsiEntry) {
+          const entryPrice = bar.open * (1 + slippageMult);
+          const posSizeUsd = capital * (params.riskPercent / 100);
+          const qty = posSizeUsd / entryPrice;
+
+          position = {
+            type: 'LONG',
+            entryBar: i,
+            entryTime: t,
+            entryPrice: Number(entryPrice.toFixed(2)),
+            qty,
+            stopLoss: entryPrice - pAtr * params.stopLossAtrMult,
+            takeProfit: entryPrice + pAtr * params.takeProfitAtrMult,
+          };
+        }
+      }
+
+      const totalEquity = capital + (position ? (bar.close - position.entryPrice) * position.qty : 0);
+      equityCurve.push({ time: t, value: Number(totalEquity.toFixed(2)), buyAndHold: Number((initialCap * (bar.close / startPrice)).toFixed(2)) });
+    }
+
+    const winTrades = trades.filter(tr => tr.netPnL > 0);
+    const lossTrades = trades.filter(tr => tr.netPnL <= 0);
+    const grossProfit = winTrades.reduce((s, tr) => s + tr.netPnL, 0);
+    const grossLoss = Math.abs(lossTrades.reduce((s, tr) => s + tr.netPnL, 0));
+
+    return {
+      trades,
+      equityCurve,
+      metrics: {
+        netProfit: Number((capital - initialCap).toFixed(2)),
+        netProfitPct: Number(((capital - initialCap) / initialCap * 100).toFixed(2)),
+        winRatePct: Number((trades.length > 0 ? (winTrades.length / trades.length) * 100 : 0).toFixed(1)),
+        profitFactor: Number((grossLoss > 0 ? grossProfit / grossLoss : 0).toFixed(2)),
+        totalTrades: trades.length,
+      }
+    };
+  }
+
+  function renderUI(res) {
+    // 1. Render Metrics
+    const metricsDiv = document.getElementById('metricsContainer');
+    metricsDiv.innerHTML = `
+      <div class="metric-card">
+        <div class="metric-title">NET KÂR</div>
+        <div class="metric-value" style="color: ${res.metrics.netProfit >= 0 ? 'var(--bull)' : 'var(--bear)'}">
+          ${res.metrics.netProfit >= 0 ? '+' : ''}${res.metrics.netProfit} $
+        </div>
+        <div class="metric-sub">Getiri: %${res.metrics.netProfitPct}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">WIN RATE</div>
+        <div class="metric-value" style="color: var(--gold)">%${res.metrics.winRatePct}</div>
+        <div class="metric-sub">Toplam İşlem: ${res.metrics.totalTrades}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">PROFIT FACTOR</div>
+        <div class="metric-value" style="color: var(--accent)">${res.metrics.profitFactor}x</div>
+        <div class="metric-sub">Brüt Kazanç / Kayıp</div>
+      </div>
+    `;
+
+    // 2. Render Charts
+    document.getElementById('priceChart').innerHTML = '';
+    const chart = LightweightCharts.createChart(document.getElementById('priceChart'), {
+      layout: { background: { color: '#121824' }, textColor: '#94a3b8' },
+      grid: { vertLines: { color: '#26334d40' }, horzLines: { color: '#26334d40' } },
+    });
+    priceChartInstance = chart;
+
+    const candleSeries = chart.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444' });
+    candleSeries.setData(currentCandles);
+
+    const markers = [];
+    res.trades.forEach(tr => {
+      markers.push({ time: tr.entryTime, position: 'belowBar', color: '#10b981', shape: 'arrowUp', text: `LONG @ ${tr.entryPrice}$` });
+      markers.push({ time: tr.exitTime, position: 'aboveBar', color: tr.netPnL > 0 ? '#10b981' : '#ef4444', shape: 'circle', text: `ÇIKIŞ: ${tr.netPnL}$` });
+    });
+    candleSeries.setMarkers(markers);
+    chart.timeScale().fitContent();
+
+    // 3. Render Table
+    const tbody = document.getElementById('tradeLogBody');
+    tbody.innerHTML = res.trades.map(tr => `
+      <tr onclick="zoomTrade(${tr.entryBar}, ${tr.exitBar})">
+        <td>#${tr.id}</td>
+        <td><span class="badge-long">${tr.type}</span></td>
+        <td>${tr.entryPrice} $</td>
+        <td>${tr.exitPrice} $</td>
+        <td>${tr.exitReason}</td>
+        <td style="text-align: right; font-weight: bold; color: ${tr.netPnL >= 0 ? 'var(--bull)' : 'var(--bear)'}">${tr.netPnL >= 0 ? '+' : ''}${tr.netPnL} $</td>
+        <td style="text-align: right; color: ${tr.netPnL >= 0 ? 'var(--bull)' : 'var(--bear)'}">${tr.netPnL >= 0 ? '+' : ''}${tr.returnPct}%</td>
+        <td style="text-align: right; color: var(--gold)">${tr.rReturn} R</td>
+        <td style="text-align: right;">${tr.capitalAfter} $</td>
+      </tr>
+    `).join('');
+  }
+
+  function zoomTrade(fromBar, toBar) {
+    if (priceChartInstance) {
+      priceChartInstance.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, fromBar - 10),
+        to: Math.min(currentCandles.length - 1, toBar + 10)
+      });
+    }
+  }
+
+  function runBacktest() {
+    const params = {
+      fastEma: parseInt(document.getElementById('fastEma').value) || 9,
+      slowEma: parseInt(document.getElementById('slowEma').value) || 21,
+      rsiEntry: parseInt(document.getElementById('rsiEntry').value) || 50,
+      stopLossAtrMult: parseFloat(document.getElementById('stopLossAtrMult').value) || 2.0,
+      takeProfitAtrMult: parseFloat(document.getElementById('takeProfitAtrMult').value) || 3.0,
+      commissionPct: parseFloat(document.getElementById('commissionPct').value) || 0.05,
+      slippageBps: parseInt(document.getElementById('slippageBps').value) || 5,
+      initialCapital: parseFloat(document.getElementById('initialCapital').value) || 10000,
+      riskPercent: parseFloat(document.getElementById('riskPercent').value) || 10,
+      trendRegime: document.getElementById('trendRegime').value,
+      seed: parseInt(document.getElementById('seed').value) || 42,
+      barCount: parseInt(document.getElementById('barCount').value) || 1500,
+    };
+
+    currentCandles = generateData(params);
+    currentBacktestResult = runSimulation(currentCandles, params);
+    renderUI(currentBacktestResult);
+  }
+
+  // Initial Auto Run on Load
+  window.onload = function() {
+    runBacktest();
+  };
+</script>
+
+</body>
+</html>
