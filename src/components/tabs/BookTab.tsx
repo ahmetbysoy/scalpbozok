@@ -213,34 +213,46 @@ export const BookTab: React.FC = () => {
 
     // 3. Draw Iceberg Order Absorption Overlay Layer
     if (activeLayers.has('iceberg')) {
+      // Geniş kova: komşu tick'ler tek kümede toplanır (gürültü azaltma)
+      const icebergBucket = tick * 8;
       const priceFills = new Map<number, number>();
       trades.forEach(tr => {
         if (now - tr.timestamp <= 15000) {
-          const pKey = Math.round(tr.price / tick) * tick;
+          const pKey = Math.round(tr.price / icebergBucket) * icebergBucket;
           priceFills.set(pKey, (priceFills.get(pKey) || 0) + tr.notional);
         }
       });
 
-      priceFills.forEach((vol, p) => {
-        if (vol > maxQty * 1.8 && Math.abs(p - mid) <= priceRange) {
-          const y = priceToY(p);
-          const x = mainCanvasW - 20;
+      // Sadece en güçlü 3 kümeyi çiz (görsel kalabalığı önler)
+      const icebergCandidates = Array.from(priceFills.entries())
+        .filter(([p, vol]) => vol > maxQty * 1.8 && Math.abs(p - mid) <= priceRange)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3);
 
-          ctx.save();
-          ctx.beginPath();
-          ctx.fillStyle = '#38bdf8';
-          ctx.arc(x, y, 6, 0, Math.PI * 2);
-          ctx.fill();
+      const icebergDrawnYs: number[] = [];
 
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
+      icebergCandidates.forEach(([p, vol]) => {
+        const y = priceToY(p);
+        // Dikeyde çakışan etiketleri atla
+        if (icebergDrawnYs.some(dy => Math.abs(dy - y) < 16)) return;
+        icebergDrawnYs.push(y);
 
-          ctx.font = '800 8px Inter, monospace';
-          ctx.fillStyle = '#38bdf8';
-          ctx.fillText(`🧊 ICEBERG ${fmtQty(vol / 1000)}k`, x - 70, y + 3);
-          ctx.restore();
-        }
+        const x = mainCanvasW - 20;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.fillStyle = '#38bdf8';
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.font = '800 8px Inter, monospace';
+        ctx.fillStyle = '#38bdf8';
+        ctx.fillText(`🧊 ICEBERG ${fmtQty(vol / 1000)}k`, x - 70, y + 3);
+        ctx.restore();
       });
     }
 
@@ -407,6 +419,7 @@ export const BookTab: React.FC = () => {
 
     // 9. Draw Active Pattern Overlays & Labels
     patternHitboxes.length = 0;
+    const usedLabelYs: number[] = [];
     activePatterns.slice(0, 5).forEach((sig: PatternSignal, idx: number) => {
       const y = priceToY(sig.price);
       if (y < 0 || y > h - 20) return;
@@ -425,7 +438,13 @@ export const BookTab: React.FC = () => {
       ctx.font = "700 10px 'SFMono-Regular','Roboto Mono',monospace";
       const ltw = ctx.measureText(labelTxt).width + 12;
       const lx = 8 + (idx * 130) % Math.max(100, mainCanvasW - 140);
-      const ly = y - 9;
+
+      // Zaten çizilmiş bir etikete 18px'den yakınsa aşağı kaydır
+      let ly = y - 9;
+      while (usedLabelYs.some(uy => Math.abs(uy - ly) < 18)) {
+        ly += 18;
+      }
+      usedLabelYs.push(ly);
 
       ctx.fillStyle = 'rgba(5, 7, 12, 0.85)';
       ctx.fillRect(lx, ly, ltw, 18);
