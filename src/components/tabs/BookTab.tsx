@@ -39,7 +39,6 @@ export const BookTab: React.FC = () => {
   const [draggingLine, setDraggingLine] = useState<'inv' | 'tp1' | 'tp2' | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number; price: number; timeAgoSec: number; qtyAtPrice: number } | null>(null);
   const [pinnedAlerts, setPinnedAlerts] = useState<PinnedAlert[]>([]);
-  const [alertHitboxes, setAlertHitboxes] = useState<{ id: string; price: number; y: number }[]>([]);
 
   const rawLayers = config.activeLayers;
   const activeLayers = useMemo(() => {
@@ -153,6 +152,17 @@ export const BookTab: React.FC = () => {
     // --------------------------------------------------------------
     type Rect = { x: number; y: number; w: number; h: number };
     const placed: Rect[] = [];
+
+    // Canlı fiyat kutusu alanını en başta rezerve et — diğer tüm etiketler
+    // (iceberg, spoof, pattern, SL/TP, fiyat ekseni) bu bölgeden otomatik kaçınır.
+    if (Number.isFinite(mid)) {
+      ctx.font = "800 11px 'SFMono-Regular','Roboto Mono',monospace";
+      const priceTxtW = ctx.measureText(fmtPrice(mid)).width + 16;
+      const priceRowH = 22;
+      const priceRowY = priceToY(mid) - priceRowH / 2;
+      placed.push({ x: mainCanvasW - priceTxtW - 6, y: priceRowY, w: priceTxtW + 6, h: priceRowH });
+    }
+
     const plotBottom = h - 24;
     const placeLabel = (x: number, y: number, ww: number, hh: number): { x: number; y: number } => {
       let cy = y;
@@ -344,9 +354,11 @@ export const BookTab: React.FC = () => {
       ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
       ctx.strokeRect(vpvrX, 0, vpvrWidth, h - 20);
 
+      // VPVR başlığı — sağ üstteki toolbar/canvas HUD'uyla çakışmasın diye
+      // sütunun alt köşesine (time-axis'in hemen üstü) yerleştiriliyor.
       ctx.font = '800 8px Inter, sans-serif';
       ctx.fillStyle = 'rgba(148, 163, 184, 0.6)';
-      ctx.fillText('VPVR', vpvrX + 4, 12);
+      ctx.fillText('VPVR', vpvrX + 4, h - 26);
 
       vpvrData.profile.forEach((val, p) => {
         if (Math.abs(p - mid) > priceRange) return;
@@ -431,11 +443,9 @@ export const BookTab: React.FC = () => {
     }
 
     // Draw Pinned Alerts
-    const newAlertHits: { id: string; price: number; y: number }[] = [];
     pinnedAlerts.forEach(alt => {
       const y = priceToY(alt.price);
       if (y >= 0 && y <= h - 20) {
-        newAlertHits.push({ id: alt.id, price: alt.price, y });
         ctx.strokeStyle = '#a855f7';
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 4]);
@@ -448,7 +458,6 @@ export const BookTab: React.FC = () => {
         drawPill(12, y + 5, `🔔 ALERT ${fmtPrice(alt.price)}`, '#a855f7', '800 9px monospace', 'left');
       }
     });
-    setAlertHitboxes(newAlertHits);
 
     // 7b. Fiyat ekseni etiketleri — COB sütununun solunda, grid ile hizalı.
     ctx.font = '700 9px monospace';
@@ -679,55 +688,55 @@ export const BookTab: React.FC = () => {
 
   return (
     <div className="view active flex flex-col h-full overflow-hidden bg-[#030509]" id="bookView">
-      {/* Top Layer Control Bar */}
-      <div className="layerBar flex gap-1.5 p-2 bg-[#050810] border-b border-[var(--border)] overflow-x-auto shrink-0 items-center">
-        <span className="text-[10px] font-bold tracking-wider text-[var(--accent)] uppercase mr-1 hidden sm:inline">Katmanlar:</span>
+      {/* Top Layer Control Bar — mobilde 4 sütun x 2 satır, masaüstünde tek satır */}
+      <div className="layerBar grid grid-cols-4 sm:flex sm:flex-wrap gap-1.5 p-2 bg-[#050810] border-b border-[var(--border)] shrink-0 items-center">
+        <span className="hidden sm:inline text-[10px] font-bold tracking-wider text-[var(--accent)] uppercase mr-1 col-span-4 sm:col-span-1 self-center">Katmanlar:</span>
         <button
           onClick={() => toggleLayer('liquidity')}
-          className={`layerBtn shrink-0 text-[10.5px] px-2.5 py-1 rounded-full border border-[var(--border)] font-bold transition-all ${activeLayers.has('liquidity') ? 'text-black bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          className={`layerBtn text-[10.5px] px-2 py-1 rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('liquidity') ? 'text-black bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
         >
-          Likidite Isısı
+          Likidite
         </button>
         <button
           onClick={() => toggleLayer('trades')}
-          className={`layerBtn shrink-0 text-[10.5px] px-2.5 py-1 rounded-full border border-[var(--border)] font-bold transition-all ${activeLayers.has('trades') ? 'text-black bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          className={`layerBtn text-[10.5px] px-2 py-1 rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('trades') ? 'text-black bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
         >
-          İşlem Baloncukları
+          İşlemler
         </button>
         <button
           onClick={() => toggleLayer('spoofing')}
-          className={`layerBtn shrink-0 text-[10.5px] px-2.5 py-1 rounded-full border border-[var(--border)] font-bold transition-all ${activeLayers.has('spoofing') ? 'text-black bg-amber-400 border-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          className={`layerBtn text-[10.5px] px-2 py-1 rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('spoofing') ? 'text-black bg-amber-400 border-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
           title="Sahte Emir / Duvar İptalleri Radar Katmanı"
         >
-          👻 Spoof Radar
+          👻 Spoof
         </button>
         <button
           onClick={() => toggleLayer('iceberg')}
-          className={`layerBtn shrink-0 text-[10.5px] px-2.5 py-1 rounded-full border border-[var(--border)] font-bold transition-all ${activeLayers.has('iceberg') ? 'text-black bg-sky-400 border-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          className={`layerBtn text-[10.5px] px-2 py-1 rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('iceberg') ? 'text-black bg-sky-400 border-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
           title="Gizli Buzdağı Emir Emilim Tespiti"
         >
-          🧊 Iceberg Avlama
+          🧊 Iceberg
         </button>
         <button
           onClick={() => toggleLayer('vpvr')}
-          className={`layerBtn shrink-0 text-[10.5px] px-2.5 py-1 rounded-full border border-[var(--border)] font-bold transition-all ${activeLayers.has('vpvr') ? 'text-black bg-emerald-400 border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          className={`layerBtn text-[10.5px] px-2 py-1 rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('vpvr') ? 'text-black bg-emerald-400 border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
           title="Fiyat Seviyesine Göre Hacim Profili (VPVR & POC)"
         >
-          📊 VPVR Profil
+          📊 VPVR
         </button>
         <button
           onClick={() => toggleLayer('crosshair')}
-          className={`layerBtn shrink-0 text-[10.5px] px-2.5 py-1 rounded-full border border-[var(--border)] font-bold transition-all ${activeLayers.has('crosshair') ? 'text-black bg-purple-400 border-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          className={`layerBtn text-[10.5px] px-2 py-1 rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('crosshair') ? 'text-black bg-purple-400 border-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
           title="Mikro-Yapı Dedektör İmleci"
         >
-          🎯 İmleç Inspector
+          🎯 İmleç
         </button>
         <button
           onClick={() => toggleLayer('liqpools')}
-          className={`layerBtn shrink-0 text-[10.5px] px-2.5 py-1 rounded-full border border-[var(--border)] font-bold transition-all ${activeLayers.has('liqpools') ? 'text-black bg-[var(--accent)] border-[var(--accent)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          className={`layerBtn text-[10.5px] px-2 py-1 rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('liqpools') ? 'text-black bg-[var(--accent)] border-[var(--accent)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
           title="Kaldıraçlı Tasfiye Havuzları"
         >
-          Liq Havuzları
+          💧 Liq
         </button>
       </div>
 
