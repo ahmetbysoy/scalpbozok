@@ -146,10 +146,75 @@ export const BookTab: React.FC = () => {
     const rightMargin = vpvrWidth + cobWidth;
     const mainCanvasW = w - rightMargin;
 
+    // --------------------------------------------------------------
+    // Ortak etiket çakışma kaydı (collision registry)
+    // SL/TP, pattern, alert, iceberg, spoof ve fiyat etiketleri aynı
+    // haritayı kullanır; birbirinin üstüne binmez, aşağı kayar.
+    // --------------------------------------------------------------
+    type Rect = { x: number; y: number; w: number; h: number };
+    const placed: Rect[] = [];
+    const plotBottom = h - 24;
+    const placeLabel = (x: number, y: number, ww: number, hh: number): { x: number; y: number } => {
+      let cy = y;
+      for (let guard = 0; guard < 24; guard++) {
+        const r = { x, y: cy, w: ww, h: hh };
+        const hit = placed.some(p =>
+          r.x < p.x + p.w && r.x + r.w > p.x &&
+          r.y < p.y + p.h && r.y + r.h > p.y
+        );
+        if (!hit || cy >= plotBottom) {
+          placed.push(r);
+          return { x, y: Math.min(cy, plotBottom - hh) };
+        }
+        cy += hh + 2;
+      }
+      placed.push({ x, y: cy, w: ww, h: hh });
+      return { x, y: cy };
+    };
+    // Ölçülü, opak arka planlı etiket pulu çizer ve yerleşimden geçirir.
+    const drawPill = (
+      x: number, y: number, text: string, color: string,
+      font = '700 9px monospace', align: 'left' | 'right' = 'left'
+    ) => {
+      ctx.font = font;
+      const padX = 5;
+      const tw = ctx.measureText(text).width + padX * 2;
+      const th = 15;
+      const lx = align === 'right' ? x - tw : x;
+      const pos = placeLabel(lx, y - th + 2, tw, th);
+      ctx.fillStyle = 'rgba(2,4,10,0.88)';
+      ctx.fillRect(pos.x, pos.y, tw, th);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(pos.x, pos.y, tw, th);
+      ctx.fillStyle = color;
+      ctx.fillText(text, pos.x + padX, pos.y + th - 4);
+    };
+
     let maxQty = 1;
     for (const snap of heatHistory) {
       if (snap.maxQty && snap.maxQty > maxQty) maxQty = snap.maxQty;
     }
+
+    // Fiyat ekseni: ince grid çizgileri + sağda (COB solunda) fiyat etiketleri.
+    // 7 dilim, ana çizim alanına sığacak şekilde.
+    const axisSteps = 7;
+    const gridPrices: number[] = [];
+    for (let i = 1; i < axisSteps; i++) {
+      gridPrices.push(priceBot + (priceRange * 2 * i) / axisSteps);
+    }
+    ctx.lineWidth = 1;
+    gridPrices.forEach(gp => {
+      const gy = priceToY(gp);
+      if (gy < 0 || gy > plotBottom) return;
+      ctx.strokeStyle = 'rgba(148,163,184,0.08)';
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath();
+      ctx.moveTo(0, gy);
+      ctx.lineTo(mainCanvasW, gy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    });
 
     // 1. Draw Liquidity Heatmap Cells Layer
     if (activeLayers.has('liquidity')) {
@@ -199,10 +264,8 @@ export const BookTab: React.FC = () => {
                 ctx.strokeStyle = 'rgba(255, 170, 0, 0.85)';
                 ctx.lineWidth = 1.2;
                 ctx.strokeRect(x - 8, y - 6, 16, 12);
-
-                ctx.font = '800 8px Inter, monospace';
-                ctx.fillStyle = '#ffaa00';
-                ctx.fillText('👻 SPOOF', x - 12, y - 8);
+                ctx.setLineDash([]);
+                drawPill(x + 10, y, '👻 SPOOF', '#ffaa00', '800 9px monospace');
                 ctx.restore();
               }
             }
@@ -237,22 +300,18 @@ export const BookTab: React.FC = () => {
         if (icebergDrawnYs.some(dy => Math.abs(dy - y) < 16)) return;
         icebergDrawnYs.push(y);
 
-        const x = mainCanvasW - 20;
-
+        const dotX = mainCanvasW - 14;
         ctx.save();
         ctx.beginPath();
         ctx.fillStyle = '#38bdf8';
-        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.arc(dotX, y, 5, 0, Math.PI * 2);
         ctx.fill();
-
         ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.4;
         ctx.stroke();
-
-        ctx.font = '800 8px Inter, monospace';
-        ctx.fillStyle = '#38bdf8';
-        ctx.fillText(`🧊 ICEBERG ${fmtQty(vol / 1000)}k`, x - 70, y + 3);
         ctx.restore();
+
+        drawPill(dotX - 10, y, `🧊 ICEBERG ${fmtQty(vol / 1000)}k`, '#38bdf8', '800 9px monospace', 'right');
       });
     }
 
@@ -362,13 +421,8 @@ export const BookTab: React.FC = () => {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        ctx.font = "800 10px 'SFMono-Regular','Roboto Mono',monospace";
         const txt = `${label} ${fmtPrice(price)}`;
-        const tw = ctx.measureText(txt).width + 10;
-        ctx.fillStyle = 'rgba(2, 4, 10, 0.85)';
-        ctx.fillRect(10, y - 10, tw, 18);
-        ctx.fillStyle = color;
-        ctx.fillText(txt, 14, y + 3);
+        drawPill(8, y + 5, txt, color, "800 10px 'SFMono-Regular','Roboto Mono',monospace", 'left');
       };
 
       if (tradePlan.stopLoss) drawPlanLine(tradePlan.stopLoss.price, 'STOP-LOSS', canvasPalette.invalidation, 'inv');
@@ -391,12 +445,27 @@ export const BookTab: React.FC = () => {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        ctx.font = '800 9px monospace';
-        ctx.fillStyle = '#a855f7';
-        ctx.fillText(`🔔 ALERT ${fmtPrice(alt.price)}`, 12, y - 3);
+        drawPill(12, y + 5, `🔔 ALERT ${fmtPrice(alt.price)}`, '#a855f7', '800 9px monospace', 'left');
       }
     });
     setAlertHitboxes(newAlertHits);
+
+    // 7b. Fiyat ekseni etiketleri — COB sütununun solunda, grid ile hizalı.
+    ctx.font = '700 9px monospace';
+    ctx.textAlign = 'right';
+    gridPrices.forEach(gp => {
+      const gy = priceToY(gp);
+      if (gy < 0 || gy > plotBottom) return;
+      const txt = fmtPrice(gp);
+      const tw = ctx.measureText(txt).width;
+      // Çakışma kaydından geçir (canlı fiyat/crosshair etiketleriyle çarpışmasın)
+      const pos = placeLabel(cobX - tw - 8, gy - 7, tw + 6, 13);
+      ctx.fillStyle = 'rgba(2,4,10,0.85)';
+      ctx.fillRect(pos.x, pos.y, tw + 6, 13);
+      ctx.fillStyle = 'rgba(148,163,184,0.75)';
+      ctx.fillText(txt, pos.x + tw + 3, pos.y + 9);
+    });
+    ctx.textAlign = 'left';
 
     // 8. Draw Live Price Marker Line
     const py = priceToY(mid);
@@ -436,24 +505,21 @@ export const BookTab: React.FC = () => {
 
       const labelTxt = `${ux.icon} ${ux.short} ${sig.confidence}%`;
       ctx.font = "700 10px 'SFMono-Regular','Roboto Mono',monospace";
-      const ltw = ctx.measureText(labelTxt).width + 12;
+      const tw = ctx.measureText(labelTxt).width + 10;
       const lx = 8 + (idx * 130) % Math.max(100, mainCanvasW - 140);
+      const ly = y + 4;
+      const pos = placeLabel(lx, ly, tw, 15);
+      usedLabelYs.push(pos.y);
 
-      // Zaten çizilmiş bir etikete 18px'den yakınsa aşağı kaydır
-      let ly = y - 9;
-      while (usedLabelYs.some(uy => Math.abs(uy - ly) < 18)) {
-        ly += 18;
-      }
-      usedLabelYs.push(ly);
-
-      ctx.fillStyle = 'rgba(5, 7, 12, 0.85)';
-      ctx.fillRect(lx, ly, ltw, 18);
+      ctx.fillStyle = 'rgba(5, 7, 12, 0.88)';
+      ctx.fillRect(pos.x, pos.y, tw, 15);
       ctx.strokeStyle = color;
-      ctx.strokeRect(lx, ly, ltw, 18);
+      ctx.lineWidth = 1;
+      ctx.strokeRect(pos.x, pos.y, tw, 15);
       ctx.fillStyle = color;
-      ctx.fillText(labelTxt, lx + 6, ly + 13);
+      ctx.fillText(labelTxt, pos.x + 5, pos.y + 11);
 
-      patternHitboxes.push({ x: lx, y: ly, w: ltw, h: 18, pattern: sig });
+      patternHitboxes.push({ x: pos.x, y: pos.y, w: tw, h: 15, pattern: sig });
     });
 
     // 10. Crosshair Inspector Overlay
@@ -675,7 +741,12 @@ export const BookTab: React.FC = () => {
             <span className="font-bold text-white truncate">{recentAnomaly.title}</span>
             <span className="text-[var(--text-dim)] truncate hidden sm:inline">— {recentAnomaly.explanation}</span>
           </div>
-          <span className="text-[9.5px] font-mono text-[var(--accent)] bg-[var(--panel2)] px-1.5 py-0.5 rounded shrink-0">BOZOK AI SYNC</span>
+          <span
+            className="text-[9.5px] font-mono text-[var(--accent)] bg-[var(--panel2)] px-1.5 py-0.5 rounded shrink-0"
+            title="Kural tabanlı PatternEngine v2 + mikro-yapı detektörleri"
+          >
+            KURAL MOTORU
+          </span>
         </div>
       )}
 
