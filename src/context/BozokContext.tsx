@@ -1,11 +1,17 @@
 // BOZOK PRO — Central State & Live WebSocket Context
 // Performance-tuned:
-//  - WebSocket reconnect with exponential backoff + jitter + visibility resume
-//  - High-frequency WS messages are buffered into refs and flushed via rAF at
-//    config.renderIntervalMs, so React only renders once per animation frame
+//  - WebSocket reconnect with exponential backoff + jitter + visibility resume.
+//  - High-frequency WS messages are buffered into refs and flushed on a timer
+//    (config.renderIntervalMs), so React renders once per interval instead of
+//    once per incoming frame.
 //  - Hot state is split into multiple small Contexts so non-relevant branches
-//    (e.g. Settings/Markets) don't re-render on every depth tick
+//    (e.g. Settings/Markets) don't re-render on every depth tick.
 //  - A legacy useBozok() shim keeps all existing consumers working.
+//
+// IMPORTANT: scheduleFlush() is intentionally a STABLE callback (empty deps).
+// All values it reads are mirrored into refs on every render, so it never
+// closes over stale state AND never changes identity — which means the WS
+// effect that depends on it will not tear down the socket on every flush.
 
 import React, {
   createContext,
@@ -58,6 +64,10 @@ const DEFAULT_LAYERS: HeatmapLayerKey[] = [
   'liquidity', 'walls', 'trades', 'liqpools', 'spoofing', 'iceberg', 'vpvr', 'crosshair'
 ];
 
+const KNOWN_LAYERS = new Set<HeatmapLayerKey>([
+  'liquidity', 'velocity', 'trades', 'walls', 'liqpools', 'spoofing', 'iceberg', 'vpvr', 'crosshair'
+]);
+
 const DEFAULT_CONFIG: AppConfig = {
   symbol: 'btcusdt',
   primaryExchange: 'binance',
@@ -95,7 +105,6 @@ const DEFAULT_CONFIG: AppConfig = {
   microBalance: 5.0,
   microRiskPct: 0.20,
   microMaxLeverage: 20,
-  // Normalised to an array — JSON-safe and no Set/Array/Object type-guards needed.
   activeLayers: new Set<HeatmapLayerKey>(DEFAULT_LAYERS)
 };
 
@@ -110,13 +119,8 @@ const LOAD_CONFIG = (): AppConfig => {
     if (Array.isArray(al)) layers = al as HeatmapLayerKey[];
     else if (al && typeof al === 'object') layers = Object.keys(al) as HeatmapLayerKey[];
     else layers = DEFAULT_LAYERS;
-    // Keep only known layer keys
-    const known = new Set<HeatmapLayerKey>([
-      'liquidity', 'velocity', 'trades', 'walls', 'liqpools', 'spoofing', 'iceberg', 'vpvr', 'crosshair'
-    ]);
-    layers = layers.filter(l => known.has(l));
+    layers = layers.filter(l => KNOWN_LAYERS.has(l));
     if (!layers.length) layers = DEFAULT_LAYERS;
-    // Re-hydrate as a Set for backward-compat with existing engine code / types.
     return { ...DEFAULT_CONFIG, ...parsed, activeLayers: new Set<HeatmapLayerKey>(layers) };
   } catch {
     return DEFAULT_CONFIG;
@@ -124,7 +128,7 @@ const LOAD_CONFIG = (): AppConfig => {
 };
 
 /* ------------------------------------------------------------------ */
-/*  Slices / context types                                             */
+/*  Slice / context types                                              */
 /* ------------------------------------------------------------------ */
 
 interface RollingAccuracy { dir: number | null; vol: number | null; dirN: number; volN: number; }
@@ -185,7 +189,7 @@ interface StableRefs {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Individual contexts (fine-grained subscriptions)                   */
+/*  Individual contexts                                                */
 /* ------------------------------------------------------------------ */
 
 const ConfigContext = createContext<AppConfig | null>(null);
@@ -200,15 +204,16 @@ const StableContext = createContext<StableRefs | null>(null);
 /* ------------------------------------------------------------------ */
 
 export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [config, setConfig] = useState<AppConfig>(LOAD_CONFIG);
+  const initialConfig = useMemo(LOAD_CONFIG, []);
 
   // --- UI / static state ---------------------------------------------------
+  const [config, setConfig] = useState<AppConfig>(initialConfig);
   const [activeTab, setActiveTab] = useState<TabKey>('bookView');
-  const [symbol, setSymbolState] = useState<string>(() => LOAD_CONFIG().symbol.toUpperCase());
+  const [symbol, setSymbolState] = useState<string>(initialConfig.symbol.toUpperCase());
   const [focusPrice, setFocusPriceState] = useState<number | null>(null);
   const [isReplaying, setIsReplaying] = useState(false);
 
-  // --- Live / hot state (updated at rAF cadence) ---------------------------
+  // --- Live / hot state ----------------------------------------------------
   const [lastPrice, setLastPrice] = useState<number | null>(null);
   const [prevPrice, setPrevPrice] = useState<number | null>(null);
   const [ticker, setTicker] = useState<TickerInfo>({ changePct: 0, volume: 0, high24h: 0, low24h: 0 });
@@ -230,7 +235,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     mexc:    { key: 'mexc',    label: 'MEXC Contract',   tag: 'contract.mexc.com',   status: 'idle',         bid: null, ask: null, ts: null, latencyMs: 0, lastError: null }
   });
 
-  // --- Signal / derived state (lower-frequency than ticks) -----------------
+  // --- Signal / derived state ----------------------------------------------
   const [activePatterns, setActivePatterns] = useState<PatternSignal[]>([]);
   const [signalsFeed, setSignalsFeed] = useState<PatternSignal[]>([]);
   const [tradePlan, setTradePlan] = useState<TradePlan | null>(null);
@@ -240,13 +245,8 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [manipIndex] = useState(0);
 
   /* ---------------------------------------------------------------- */
-  /*  Stable refs (engine instances + DOM-shared mutable arrays)       */
+  /*  Engine singletons + DOM-shared mutable refs                      */
   /* ---------------------------------------------------------------- */
-
-  const configRef = useRef(config);
-  configRef.current = config;
-  const symbolRef = useRef(symbol);
-  symbolRef.current = symbol;
 
   const patternEngineRef = useRef(new PatternEngineV2());
   const narrativeEngineRef = useRef(new NarrativeEngine());
@@ -260,19 +260,33 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const cvdDivDetRef = useRef(new CVDDivergenceDetector());
 
   const audioCtxRef = useRef<AudioContext | null>(null);
-  // Shared mutable hitboxes — BookTab writes, canvas reads without re-rendering.
   const planHitboxesRef = useRef<{ id: string; label: string; price: number; y: number }[]>([]);
   const patternHitboxesRef = useRef<{ x: number; y: number; w: number; h: number; pattern: PatternSignal }[]>([]);
 
-  // Buffered live data between rAF flushes (avoids setState per WS frame)
+  /* ---------------------------------------------------------------- */
+  /*  Live mirrors — every value read inside scheduleFlush MUST be     */
+  /*  mirrored here so the callback can have an empty dep array.       */
+  /* ---------------------------------------------------------------- */
+
+  const configRef = useRef(config); configRef.current = config;
+  const symbolRef = useRef(symbol); symbolRef.current = symbol;
+
+  const cvdRef = useRef(cvd); cvdRef.current = cvd;
+  const cvdHistoryRef = useRef(cvdHistory); cvdHistoryRef.current = cvdHistory;
+  const vpinRef = useRef(vpinValue); vpinRef.current = vpinValue;
+  const tradesMirrorRef = useRef(trades); tradesMirrorRef.current = trades;
+  const heatMirrorRef = useRef(heatHistory); heatMirrorRef.current = heatHistory;
+  const liquidationsRef = useRef(liquidations); liquidationsRef.current = liquidations;
+  const exchangesRef = useRef(exchanges); exchangesRef.current = exchanges;
+  const lastPriceRef = useRef(lastPrice); lastPriceRef.current = lastPrice;
+  const tickerRef = useRef(ticker); tickerRef.current = ticker;
+
+  // Buffered live data between flushes (avoids setState per WS frame)
   const pendingDepthRef = useRef<{ bids: BookLevel[]; asks: BookLevel[]; ts: number } | null>(null);
   const pendingTradesRef = useRef<Trade[]>([]);
   const pendingTickerRef = useRef<TickerInfo | null>(null);
   const pendingLiquidationsRef = useRef<LiquidationEvent[]>([]);
-  const lastTradesRef = useRef<Trade[]>([]);
-  const lastHeatRef = useRef<{ t: number; bids: [number, number][]; asks: [number, number][]; maxQty: number }[]>([]);
-  const lastBookRef = useRef<Book>({ bids: [], asks: [], ts: 0 });
-  const flushRafRef = useRef<number | null>(null);
+  const flushTimerRef = useRef<number | null>(null);
   const lastFlushTsRef = useRef(0);
 
   /* ---------------------------------------------------------------- */
@@ -313,7 +327,6 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const setFocusPrice = useCallback((p: number | null, durationMs = 12000) => {
     setFocusPriceState(p);
-    // Auto-clear focus after duration (optional UX feature; focusUntil unused for now)
     if (p != null) {
       window.setTimeout(() => {
         setFocusPriceState(curr => (curr === p ? null : curr));
@@ -351,7 +364,6 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
     try {
       const ux = signalUX(sig);
-      // avoid importing fmtPrice in hot closure just for speech
       const priceTxt = Number.isFinite(sig.price) ? sig.price.toFixed(2) : '';
       let txt = (sig.severity === 'critical' ? 'Dikkat! ' : '') + (ux.title || sig.title);
       if (priceTxt) txt += ', fiyat ' + priceTxt;
@@ -391,17 +403,17 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [signalsFeed, symbol]);
 
   /* ---------------------------------------------------------------- */
-  /*  rAF flush — coalesces all buffered WS updates into one render    */
+  /*  Flush scheduler — STABLE (empty deps, reads everything via refs) */
   /* ---------------------------------------------------------------- */
 
   const scheduleFlush = useCallback(() => {
-    if (flushRafRef.current != null) return; // already scheduled
+    if (flushTimerRef.current != null) return; // already scheduled
     const cfg = configRef.current;
     const interval = Math.max(50, cfg.renderIntervalMs || 150);
-    const now = performance.now();
-    const wait = Math.max(0, interval - (now - lastFlushTsRef.current));
-    flushRafRef.current = window.setTimeout(() => {
-      flushRafRef.current = null;
+    const wait = Math.max(0, interval - (performance.now() - lastFlushTsRef.current));
+
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null;
       lastFlushTsRef.current = performance.now();
 
       const depth = pendingDepthRef.current;
@@ -414,14 +426,13 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       pendingTickerRef.current = null;
       pendingLiquidationsRef.current = [];
 
+      const c = configRef.current;
+
       // --- Trades / CVD / VPIN -----------------------------------------
-      let nextTrades = lastTradesRef.current;
-      let nextCvd = cvd;
-      let nextCvdHist = cvdHistory;
-      let nextVpin = vpinValue;
       if (newTrades.length) {
-        nextTrades = [...newTrades, ...nextTrades].slice(0, 2000);
-        lastTradesRef.current = nextTrades;
+        const prevTrades = tradesMirrorRef.current;
+        const nextTrades = [...newTrades, ...prevTrades].slice(0, 2000);
+        tradesMirrorRef.current = nextTrades;
         setTrades(nextTrades);
 
         let delta = 0;
@@ -429,9 +440,14 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           delta += t.side === 'buy' ? t.qty : -t.qty;
           vpinCalcRef.current.update(t);
         }
-        nextCvd = cvd + delta;
-        nextCvdHist = [...cvdHistory.slice(-120), nextCvd];
-        nextVpin = vpinCalcRef.current.getVPIN();
+        const nextCvd = cvdRef.current + delta;
+        const nextCvdHist = [...cvdHistoryRef.current.slice(-120), nextCvd];
+        const nextVpin = vpinCalcRef.current.getVPIN();
+
+        cvdRef.current = nextCvd;
+        cvdHistoryRef.current = nextCvdHist;
+        vpinRef.current = nextVpin;
+
         setCvd(nextCvd);
         setCvdHistory(nextCvdHist);
         setVpinValue(nextVpin);
@@ -441,21 +457,24 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (depth) {
         const { bids, asks, ts } = depth;
         const newBook: Book = { bids, asks, ts, label: 'Binance' };
-        lastBookRef.current = newBook;
         setBook(newBook);
 
         if (bids.length && asks.length) {
           const mid = (bids[0].price + asks[0].price) / 2;
-          setLastPrice(prev => { setPrevPrice(prev); return mid; });
+          // Capture the previous mid for price-flash colour, then replace.
+          // Both writes happen outside a state updater (StrictMode-safe).
+          setPrevPrice(lastPriceRef.current);
+          lastPriceRef.current = mid;
+          setLastPrice(mid);
 
           // Heatmap history
           let snapMax = 1;
           for (const l of [...bids.slice(0, 20), ...asks.slice(0, 20)]) {
             if (l.qty > snapMax) snapMax = l.qty;
           }
-          const cut = ts - configRef.current.heatmapWindowSec * 1000;
+          const cut = ts - c.heatmapWindowSec * 1000;
           const nextHeat = [
-            ...lastHeatRef.current.filter(s => s.t >= cut),
+            ...heatMirrorRef.current.filter(s => s.t >= cut),
             {
               t: ts,
               bids: bids.slice(0, 20).map(b => [b.price, b.qty] as [number, number]),
@@ -463,20 +482,23 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               maxQty: snapMax
             }
           ];
-          lastHeatRef.current = nextHeat;
+          heatMirrorRef.current = nextHeat;
           setHeatHistory(nextHeat);
 
-          // Exchange top-of-book
-          setExchanges(prev => ({
-            ...prev,
-            binance: { ...prev.binance, bid: bids[0].price, ask: asks[0].price, ts }
-          }));
+          // Exchange top-of-book — keep mirror in sync inside updater.
+          setExchanges(prev => {
+            const next = {
+              ...prev,
+              binance: { ...prev.binance, bid: bids[0].price, ask: asks[0].price, ts }
+            };
+            exchangesRef.current = next;
+            return next;
+          });
 
-          // Pattern engine — runs once per flush instead of per 100ms frame
-          const c = configRef.current;
+          // Pattern engine — runs once per flush instead of per 100ms frame.
           const detected = patternEngineRef.current.analyze(
             { mid, bidRows: bids, askRows: asks },
-            lastTradesRef.current,
+            tradesMirrorRef.current,
             nextHeat.map(h => ({ bids: h.bids, asks: h.asks })),
             c.wallMult,
             c.spoofWindowMs,
@@ -486,7 +508,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           );
           setActivePatterns(detected);
 
-          // Emit new signals to feed + announce
+          // Emit new signals to feed + announce.
           for (const sig of detected) {
             if (!(sig as any)._emitted && sig.confidence >= c.minSignalConfidence) {
               (sig as any)._emitted = true;
@@ -505,12 +527,12 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const metaPlan = metaStrategyRef.current.evaluate(
             detected,
             { mid, bidRows: bids, askRows: asks },
-            lastTradesRef.current,
-            liquidations,
+            tradesMirrorRef.current,
+            liquidationsRef.current,
             perfTrackerRef.current,
             symbolRef.current,
             c.multiExchange,
-            exchanges
+            exchangesRef.current
           );
           const finalPlan = (metaPlan && metaPlan.confidence >= 75) ? metaPlan : basePlan;
           setTradePlan(finalPlan);
@@ -531,38 +553,62 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
           flowBuilderRef.current.update(
             { mid, bidRows: bids, askRows: asks },
-            lastTradesRef.current,
+            tradesMirrorRef.current,
             detected,
-            liquidations
+            liquidationsRef.current
           );
           setFlowCandles(flowBuilderRef.current.getCandles());
         }
       }
 
-      if (tickerPatch) setTicker(tickerPatch);
+      if (tickerPatch) {
+        tickerRef.current = tickerPatch;
+        setTicker(tickerPatch);
+      }
+
       if (newLiqs.length) {
-        setLiquidations(prev => [...newLiqs, ...prev].slice(0, 500));
+        setLiquidations(prev => {
+          const next = [...newLiqs, ...prev].slice(0, 500);
+          liquidationsRef.current = next;
+          return next;
+        });
       }
     }, wait);
-  }, [announceSignal, cvd, cvdHistory, liquidations, exchanges, vpinValue]);
+  }, [announceSignal]); // <-- STABLE: announceSignal itself is stable.
 
-  // Cancel pending flush on unmount
+  // Cancel pending flush on unmount.
   useEffect(() => () => {
-    if (flushRafRef.current != null) clearTimeout(flushRafRef.current);
+    if (flushTimerRef.current != null) clearTimeout(flushTimerRef.current);
   }, []);
 
   /* ---------------------------------------------------------------- */
-  /*  Primary Binance Futures WebSocket with reconnect+backoff         */
+  /*  Primary Binance Futures WS with reconnect + backoff              */
   /* ---------------------------------------------------------------- */
 
   useEffect(() => {
-    let ws: WebSocket | null = null;
+    // Binance split its public market data into two base endpoints:
+    //   /public  -> high-frequency order book / depth
+    //   /market  -> regular market data (aggTrade, ticker, forceOrder)
+    // Mixing the two on the legacy root /stream endpoint silently drops
+    // aggTrade/ticker/forceOrder frames (verified against the live API),
+    // which is why CVD/VPIN/tape and 24h change stayed empty.
+    const sockets: { ws: WebSocket; tag: string; reconnectTimer: number | null; attempt: number }[] = [
+      { ws: null as any, tag: 'depth',   reconnectTimer: null, attempt: 0 },
+      { ws: null as any, tag: 'market',  reconnectTimer: null, attempt: 0 }
+    ];
     let isCancelled = false;
-    let reconnectTimer: number | null = null;
-    let attempt = 0;
     let explicitlyClosed = false;
+    let visHandler: (() => void) | null = null;
 
-    // ExchangeInfo snapshot — best-effort, failures ignored.
+    const markBinance = (status: ExchangeState['status'], err?: string | null) => {
+      setConnStatus(status);
+      setExchanges(prev => ({
+        ...prev,
+        binance: { ...prev.binance, status, lastError: err ?? prev.binance.lastError }
+      }));
+    };
+
+    // Best-effort exchange info snapshot for tick/step sizes.
     fetch(`https://fapi.binance.com/fapi/v1/exchangeInfo?symbol=${symbol}`)
       .then(r => r.json())
       .then(json => {
@@ -583,166 +629,158 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })
       .catch(() => {});
 
-    const connect = () => {
+    const handleFrame = (event: MessageEvent) => {
       if (isCancelled) return;
-      const sym = symbol.toLowerCase();
-      const wsUrl =
-        `wss://fstream.binance.com/stream?streams=${sym}@depth20@100ms/${sym}@aggTrade/${sym}@ticker/${sym}@forceOrder`;
+      let msg: any;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      const data = msg.data || msg;
+      if (!data) return;
+      const now = Date.now();
+      const stream: string = msg.stream || '';
 
+      if (stream.includes('@depth')) {
+        const rawBids = data.b || data.bids || [];
+        const rawAsks = data.a || data.asks || [];
+
+        if (rawBids.length > 0 && Array.isArray(rawBids[0]) && typeof rawBids[0][0] === 'string') {
+          const decs = (rawBids[0][0].replace(/0+$/, '').split('.')[1] || '').length;
+          if (decs > 0) {
+            setSymbolPrecision({
+              tickSize: Math.pow(10, -decs),
+              priceDecimals: Math.max(2, decs),
+              loaded: true
+            });
+          }
+        }
+
+        const bids: BookLevel[] = rawBids
+          .map(([p, q]: [string, string]) => {
+            const price = parseFloat(p), qty = parseFloat(q);
+            return { price, qty, notional: price * qty };
+          })
+          .filter((b: BookLevel) => b.qty > 0)
+          .sort((a: BookLevel, b: BookLevel) => b.price - a.price);
+
+        const asks: BookLevel[] = rawAsks
+          .map(([p, q]: [string, string]) => {
+            const price = parseFloat(p), qty = parseFloat(q);
+            return { price, qty, notional: price * qty };
+          })
+          .filter((a: BookLevel) => a.qty > 0)
+          .sort((a: BookLevel, b: BookLevel) => a.price - b.price);
+
+        pendingDepthRef.current = { bids, asks, ts: now };
+        scheduleFlush();
+      } else if (stream.includes('@aggTrade')) {
+        const price = parseFloat(data.p);
+        const qty = parseFloat(data.q);
+        const side = data.m ? 'sell' : 'buy';
+        pendingTradesRef.current.push({
+          price, qty, side,
+          timestamp: data.T || now,
+          notional: price * qty
+        });
+        scheduleFlush();
+      } else if (stream.includes('@ticker')) {
+        pendingTickerRef.current = {
+          changePct: parseFloat(data.P || 0),
+          volume:    parseFloat(data.q || 0),
+          high24h:   parseFloat(data.h || 0),
+          low24h:    parseFloat(data.l || 0)
+        };
+        scheduleFlush();
+      } else if (stream.includes('@forceOrder')) {
+        const o = data.o || data;
+        if (!o) return;
+        const price = parseFloat(o.p || o.ap);
+        const qty = parseFloat(o.q);
+        const notionalUsd = price * qty;
+        if (notionalUsd >= configRef.current.minLiquidationNotional) {
+          pendingLiquidationsRef.current.push({
+            id: `liq_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            symbol: o.s || symbolRef.current,
+            side: o.S === 'SELL' ? 'long' : 'short',
+            price, qty, notionalUsd,
+            timestamp: o.T || now
+          });
+          scheduleFlush();
+        }
+      }
+    };
+
+    const connectSocket = (entry: typeof sockets[number], url: string) => {
+      if (isCancelled) return;
       try {
-        ws = new WebSocket(wsUrl);
-        setConnStatus('connecting');
-        setExchanges(prev => ({ ...prev, binance: { ...prev.binance, status: 'connecting' } }));
+        const ws = new WebSocket(url);
+        entry.ws = ws;
 
         ws.onopen = () => {
           if (isCancelled) return;
-          attempt = 0;
-          setConnStatus('live');
-          setExchanges(prev => ({ ...prev, binance: { ...prev.binance, status: 'live', lastError: null } }));
+          entry.attempt = 0;
+          // Binance is "live" only once BOTH sockets are up.
+          const bothOpen = sockets.every(s => s.ws && s.ws.readyState === WebSocket.OPEN);
+          if (bothOpen) markBinance('live', null);
+          else markBinance('connecting', null);
         };
 
-        ws.onmessage = (event) => {
-          if (isCancelled) return;
-          let msg: any;
-          try { msg = JSON.parse(event.data); } catch { return; }
-          const data = msg.data || msg;
-          if (!data) return;
-          const now = Date.now();
-          const stream: string = msg.stream || '';
-
-          // --- Depth --------------------------------------------------
-          if (stream.includes('@depth')) {
-            const rawBids = data.b || data.bids || [];
-            const rawAsks = data.a || data.asks || [];
-
-            // Auto-detect price precision from raw string prices
-            if (rawBids.length > 0 && Array.isArray(rawBids[0]) && typeof rawBids[0][0] === 'string') {
-              const decs = (rawBids[0][0].replace(/0+$/, '').split('.')[1] || '').length;
-              if (decs > 0) {
-                setSymbolPrecision({
-                  tickSize: Math.pow(10, -decs),
-                  priceDecimals: Math.max(2, decs),
-                  loaded: true
-                });
-              }
-            }
-
-            const bids: BookLevel[] = rawBids
-              .map(([p, q]: [string, string]) => {
-                const price = parseFloat(p), qty = parseFloat(q);
-                return { price, qty, notional: price * qty };
-              })
-              .filter((b: BookLevel) => b.qty > 0)
-              .sort((a: BookLevel, b: BookLevel) => b.price - a.price);
-
-            const asks: BookLevel[] = rawAsks
-              .map(([p, q]: [string, string]) => {
-                const price = parseFloat(p), qty = parseFloat(q);
-                return { price, qty, notional: price * qty };
-              })
-              .filter((a: BookLevel) => a.qty > 0)
-              .sort((a: BookLevel, b: BookLevel) => a.price - b.price);
-
-            pendingDepthRef.current = { bids, asks, ts: now };
-            scheduleFlush();
-          }
-
-          // --- AggTrade -----------------------------------------------
-          else if (stream.includes('@aggTrade')) {
-            const price = parseFloat(data.p);
-            const qty = parseFloat(data.q);
-            const side = data.m ? 'sell' : 'buy';
-            pendingTradesRef.current.push({
-              price, qty, side,
-              timestamp: data.T || now,
-              notional: price * qty
-            });
-            scheduleFlush();
-          }
-
-          // --- 24h Ticker ---------------------------------------------
-          else if (stream.includes('@ticker')) {
-            pendingTickerRef.current = {
-              changePct: parseFloat(data.P || 0),
-              volume:    parseFloat(data.q || 0),
-              high24h:   parseFloat(data.h || 0),
-              low24h:    parseFloat(data.l || 0)
-            };
-            scheduleFlush();
-          }
-
-          // --- Force Order / Liquidation ------------------------------
-          else if (stream.includes('@forceOrder')) {
-            const o = data.o || data;
-            if (!o) return;
-            const price = parseFloat(o.p || o.ap);
-            const qty = parseFloat(o.q);
-            const notionalUsd = price * qty;
-            if (notionalUsd >= configRef.current.minLiquidationNotional) {
-              pendingLiquidationsRef.current.push({
-                id: `liq_${now}_${Math.random().toString(36).slice(2, 8)}`,
-                symbol: o.s || symbolRef.current,
-                side: o.S === 'SELL' ? 'long' : 'short',
-                price, qty, notionalUsd,
-                timestamp: o.T || now
-              });
-              scheduleFlush();
-            }
-          }
-        };
+        ws.onmessage = handleFrame;
 
         ws.onerror = () => {
-          setConnStatus('bad');
-          setExchanges(prev => ({ ...prev, binance: { ...prev.binance, status: 'bad', lastError: 'WS error' } }));
+          markBinance('bad', `WS ${entry.tag} error`);
         };
 
         ws.onclose = (ev) => {
           if (isCancelled || explicitlyClosed) return;
-          setConnStatus('disconnected');
-          setExchanges(prev => ({ ...prev, binance: { ...prev.binance, status: 'disconnected', lastError: `code ${ev.code}` } }));
-          // Exponential backoff with jitter: 1s, 2s, 4s, 8s ... capped 30s
-          attempt += 1;
-          const base = Math.min(30000, 1000 * 2 ** Math.min(attempt - 1, 5));
+          markBinance('disconnected', `WS ${entry.tag} closed code ${ev.code}`);
+          entry.attempt += 1;
+          const base = Math.min(30000, 1000 * 2 ** Math.min(entry.attempt - 1, 5));
           const jitter = Math.random() * 500;
-          reconnectTimer = window.setTimeout(connect, base + jitter);
+          entry.reconnectTimer = window.setTimeout(() => connectSocket(entry, url), base + jitter);
         };
       } catch (e: any) {
-        setConnStatus('error');
-        setExchanges(prev => ({ ...prev, binance: { ...prev.binance, status: 'error', lastError: String(e?.message || e) } }));
-        reconnectTimer = window.setTimeout(connect, 2000);
+        markBinance('error', String(e?.message || e));
+        entry.reconnectTimer = window.setTimeout(() => connectSocket(entry, url), 2000);
       }
     };
 
-    connect();
+    const sym = symbol.toLowerCase();
+    // /public for high-frequency depth; /market for regular trade/ticker/liq.
+    const depthUrl  = `wss://fstream.binance.com/public/stream?streams=${sym}@depth20@100ms`;
+    const marketUrl = `wss://fstream.binance.com/market/stream?streams=${sym}@aggTrade/${sym}@ticker/${sym}@forceOrder`;
 
-    // When tab becomes visible again, force-reconnect if the socket looks dead.
-    const onVis = () => {
+    connectSocket(sockets[0], depthUrl);
+    connectSocket(sockets[1], marketUrl);
+
+    visHandler = () => {
       if (document.visibilityState === 'visible') {
-        if (!ws || ws.readyState > 1) { // CLOSING or CLOSED
-          explicitlyClosed = false;
-          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-          attempt = 0;
-          connect();
+        for (const entry of sockets) {
+          if (!entry.ws || entry.ws.readyState > 1) {
+            if (entry.reconnectTimer) { clearTimeout(entry.reconnectTimer); entry.reconnectTimer = null; }
+            entry.attempt = 0;
+            const url = entry.tag === 'depth' ? depthUrl : marketUrl;
+            connectSocket(entry, url);
+          }
         }
       }
     };
-    document.addEventListener('visibilitychange', onVis);
+    document.addEventListener('visibilitychange', visHandler);
 
     return () => {
       isCancelled = true;
       explicitlyClosed = true;
-      document.removeEventListener('visibilitychange', onVis);
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (ws) {
-        try { ws.onclose = null; ws.close(); } catch {}
+      if (visHandler) document.removeEventListener('visibilitychange', visHandler);
+      for (const entry of sockets) {
+        if (entry.reconnectTimer) clearTimeout(entry.reconnectTimer);
+        if (entry.ws) {
+          try { entry.ws.onclose = null; entry.ws.close(); } catch {}
+        }
       }
     };
-    // Intentionally only depends on `symbol` — all other live config is read
-    // through refs so adjusting wallMult / sensitivity no longer tears down WS.
+    // scheduleFlush is STABLE; this effect only restarts on symbol change.
   }, [symbol, scheduleFlush]);
 
   /* ---------------------------------------------------------------- */
-  /*  Multi-exchange secondary price polling                           */
+  /*  Multi-exchange polling                                           */
   /* ---------------------------------------------------------------- */
 
   useEffect(() => {
@@ -758,10 +796,11 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const json = await res.json();
         const item = json?.result?.list?.[0];
         if (!isCancelled && item) {
-          setExchanges(prev => ({
-            ...prev,
-            bybit: { ...prev.bybit, status: 'live', bid: parseFloat(item.bid1Price) || null, ask: parseFloat(item.ask1Price) || null, ts: Date.now() }
-          }));
+          setExchanges(prev => {
+            const next = { ...prev, bybit: { ...prev.bybit, status: 'live' as const, bid: parseFloat(item.bid1Price) || null, ask: parseFloat(item.ask1Price) || null, ts: Date.now() } };
+            exchangesRef.current = next;
+            return next;
+          });
         }
       } catch {}
 
@@ -771,10 +810,11 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const json = await res.json();
         const item = json?.data?.[0];
         if (!isCancelled && item) {
-          setExchanges(prev => ({
-            ...prev,
-            okx: { ...prev.okx, status: 'live', bid: parseFloat(item.bidPx) || null, ask: parseFloat(item.askPx) || null, ts: Date.now() }
-          }));
+          setExchanges(prev => {
+            const next = { ...prev, okx: { ...prev.okx, status: 'live' as const, bid: parseFloat(item.bidPx) || null, ask: parseFloat(item.askPx) || null, ts: Date.now() } };
+            exchangesRef.current = next;
+            return next;
+          });
         }
       } catch {}
 
@@ -784,10 +824,11 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const json = await res.json();
         const item = json?.data;
         if (!isCancelled && item) {
-          setExchanges(prev => ({
-            ...prev,
-            mexc: { ...prev.mexc, status: 'live', bid: parseFloat(item.bid1) || null, ask: parseFloat(item.ask1) || null, ts: Date.now() }
-          }));
+          setExchanges(prev => {
+            const next = { ...prev, mexc: { ...prev.mexc, status: 'live' as const, bid: parseFloat(item.bid1) || null, ask: parseFloat(item.ask1) || null, ts: Date.now() } };
+            exchangesRef.current = next;
+            return next;
+          });
         }
       } catch {}
     };
@@ -855,7 +896,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 };
 
 /* ------------------------------------------------------------------ */
-/*  Fine-grained public hooks (preferred for new components)           */
+/*  Fine-grained public hooks                                         */
 /* ------------------------------------------------------------------ */
 
 export const useBozokConfig = () => {
@@ -890,7 +931,7 @@ export const useBozokStable = () => {
 };
 
 /* ------------------------------------------------------------------ */
-/*  Legacy combined hook (keeps existing components untouched)         */
+/*  Legacy combined hook                                              */
 /* ------------------------------------------------------------------ */
 
 export const useBozok = () => {
