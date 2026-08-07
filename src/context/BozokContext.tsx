@@ -242,7 +242,20 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [narrative, setNarrative] = useState<Narrative>({ icon: '🌐', title: 'NÖTR / BEKLE', bias: 'neu', text: 'Veri bekleniyor...' });
   const [microResult, setMicroResult] = useState<MicroResult | null>(null);
   const [sigCounts, setSigCounts] = useState<{ bull: number; bear: number; warn: number }>({ bull: 0, bear: 0, warn: 0 });
-  const [manipIndex] = useState(0);
+  const [rollingAccuracy, setRollingAccuracy] = useState<RollingAccuracy | null>(null);
+  // manipIndex: son 60 saniyedeki duvar çekme/spoof yoğunluğundan türetilir.
+  // Sabit gösterim yerine gerçek sinyal akışı kullanılır; mock veri yoktur.
+  const manipIndex = useMemo(() => {
+    const cutoff = Date.now() - 60000;
+    const spoofCount = signalsFeed.filter(s => {
+      const type = (s.type || '').toUpperCase();
+      const withinWindow = (s.createdAt || 0) >= cutoff;
+      return withinWindow && (type.includes('WALL_PULL') || type.includes('SPOOF'));
+    }).length;
+
+    // Her bir anlamlı spoof/spike ~15 puan etkiler; 7 olayda yaklaşık max skora ulaşır.
+    return Math.min(100, spoofCount * 15);
+  }, [signalsFeed]);
 
   /* ---------------------------------------------------------------- */
   /*  Engine singletons + DOM-shared mutable refs                      */
@@ -280,6 +293,11 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const exchangesRef = useRef(exchanges); exchangesRef.current = exchanges;
   const lastPriceRef = useRef(lastPrice); lastPriceRef.current = lastPrice;
   const tickerRef = useRef(ticker); tickerRef.current = ticker;
+
+  // Sinyal doğrulama takibi: Her yeni sinyal 45 sn sonra fiyat yönüne göre
+  // test edilir. verified olan sinyaller rolling doğruluk oranını besler.
+  const pendingVerifyRef = useRef<PatternSignal[]>([]);
+  const signalsFeedRef = useRef<PatternSignal[]>([]); signalsFeedRef.current = signalsFeed;
 
   // Buffered live data between flushes (avoids setState per WS frame)
   const pendingDepthRef = useRef<{ bids: BookLevel[]; asks: BookLevel[]; ts: number } | null>(null);
@@ -514,6 +532,14 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               (sig as any)._emitted = true;
               announceSignal(sig);
               setSignalsFeed(prev => [sig, ...prev.slice(0, 200)]);
+
+              // Yalnızca net yönlü sinyalleri doğrulama kuyruğuna al.
+              const isBull = sig.bias === 'bullish' || sig.bias === 'bull';
+              const isBear = sig.bias === 'bearish' || sig.bias === 'bear';
+              if ((isBull || isBear) && Number.isFinite(sig.price) && sig.price > 0) {
+                pendingVerifyRef.current.push(sig);
+              }
+
               const bucket =
                 sig.bias === 'bullish' || sig.bias === 'bull' ? 'bull' :
                 sig.bias === 'bearish' || sig.bias === 'bear' ? 'bear' : 'warn';
@@ -839,6 +865,69 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [symbol, config.multiExchange]);
 
   /* ---------------------------------------------------------------- */
+  /*  Sinyal doğrulama / gerçek rolling accuracy                       */
+  /* ---------------------------------------------------------------- */
+
+  useEffect(() => {
+    const HORIZON_MS = 45000;
+    const MOVE_BPS = 3; // ~%0.03 hedef hareket; mikro-yapı sinyalleri kısa vadelidir.
+    let timer: number | null = null;
+
+    const evaluate = () => {
+      timer = null;
+      const now = Date.now();
+      const pending = pendingVerifyRef.current;
+      if (!pending.length) return;
+
+      const remaining: PatternSignal[] = [];
+      let changed = false;
+
+      for (const sig of pending) {
+        const age = now - (sig.createdAt || now);
+        if (age < HORIZON_MS) {
+          remaining.push(sig);
+          continue;
+        }
+
+        changed = true;
+        const currentMid = lastPriceRef.current;
+        if (!currentMid || !Number.isFinite(currentMid) || !Number.isFinite(sig.price) || sig.price <= 0) {
+          sig.verified = { hit: false, pct: 0 };
+          continue;
+        }
+
+        const deltaBps = ((currentMid - sig.price) / sig.price) * 10000;
+        const isBull = sig.bias === 'bullish' || sig.bias === 'bull';
+        const hit = isBull ? deltaBps >= MOVE_BPS : deltaBps <= -MOVE_BPS;
+        sig.verified = { hit, pct: Math.abs(deltaBps) };
+      }
+
+      pendingVerifyRef.current = remaining;
+      if (!changed) return;
+
+      const feed = signalsFeedRef.current;
+      const verifiedSignals = feed.filter(s => s.verified);
+      const hits = verifiedSignals.filter(s => s.verified?.hit).length;
+      const dirPct = verifiedSignals.length
+        ? Math.round((hits / verifiedSignals.length) * 100)
+        : null;
+
+      setSignalsFeed([...feed]);
+      setRollingAccuracy({
+        dir: dirPct,
+        vol: null,
+        dirN: verifiedSignals.length,
+        volN: 0
+      });
+    };
+
+    timer = window.setInterval(evaluate, 1000);
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, []);
+
+  /* ---------------------------------------------------------------- */
   /*  Replay stubs                                                     */
   /* ---------------------------------------------------------------- */
 
@@ -859,9 +948,8 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const signalValue = useMemo<SignalSlice>(() => ({
     activePatterns, signalsFeed, tradePlan, narrative, microResult,
-    sigCounts, manipIndex,
-    rollingAccuracy: { dir: 75, vol: 80, dirN: 12, volN: 15 }
-  }), [activePatterns, signalsFeed, tradePlan, narrative, microResult, sigCounts, manipIndex]);
+    sigCounts, manipIndex, rollingAccuracy
+  }), [activePatterns, signalsFeed, tradePlan, narrative, microResult, sigCounts, manipIndex, rollingAccuracy]);
 
   const uiValue = useMemo<UISlice>(() => ({
     activeTab, setActiveTab, focusPrice, setFocusPrice, isReplaying

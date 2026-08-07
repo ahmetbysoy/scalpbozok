@@ -1,6 +1,6 @@
 // BOZOK PRO — MarketsTab Multi-Exchange Arbitrage & Quality Component
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useBozok } from '../../context/BozokContext';
 import { fmtPrice, fmtAgo } from '../../utils/fmt';
 
@@ -8,6 +8,40 @@ export const MarketsTab: React.FC = () => {
   const { exchanges, lastPrice, config } = useBozok();
 
   const primaryMid = lastPrice;
+
+  const quality = useMemo(() => {
+    const exList = Object.values(exchanges);
+    const liveCount = exList.filter(
+      ex => ex.status === 'live' || ex.status === 'connected'
+    ).length;
+
+    const now = Date.now();
+    const freshnessScores = exList.map(ex => {
+      if (!ex.ts) return 0;
+      const ageMs = now - ex.ts;
+      if (ageMs <= 3000) return 100;
+      if (ageMs >= 15000) return 0;
+      return Math.round(100 - ((ageMs - 3000) / 12000) * 100);
+    });
+
+    const avgFreshness = freshnessScores.length
+      ? Math.round(freshnessScores.reduce((a, b) => a + b, 0) / freshnessScores.length)
+      : 0;
+
+    const liveRatioScore = exList.length
+      ? Math.round((liveCount / exList.length) * 100)
+      : 0;
+
+    const score = Math.round(liveRatioScore * 0.6 + avgFreshness * 0.4);
+
+    return {
+      score,
+      liveCount,
+      total: exList.length,
+      avgFreshness,
+      color: score >= 80 ? 'var(--bull)' : score >= 50 ? 'var(--signal)' : 'var(--bear)'
+    };
+  }, [exchanges]);
 
   return (
     <div className="view active flex flex-col h-full overflow-hidden" id="marketsView">
@@ -17,22 +51,35 @@ export const MarketsTab: React.FC = () => {
             <div className="marketSummaryTitle font-extrabold text-xs text-[var(--text)]">
               Global Book & Çapraz Borsa Taraması
             </div>
-            <div className="qualityBadge mono font-extrabold text-xs px-2 py-1 rounded-lg border border-[var(--bull)]/30 bg-[var(--bull)]/10 text-[var(--bull)]">
-              KALİTE %92/100
+            <div
+              className="qualityBadge mono font-extrabold text-xs px-2 py-1 rounded-lg border"
+              style={{
+                borderColor: `${quality.color}4d`,
+                backgroundColor: `${quality.color}1a`,
+                color: quality.color
+              }}
+            >
+              KALİTE %{quality.score}/100
             </div>
           </div>
           <div className="marketSummaryGrid grid grid-cols-3 gap-2 text-xs">
             <div className="marketMini">
               <div className="l text-[9px] text-[var(--text-faint)] uppercase">Global Kaynak</div>
-              <div className="v mono font-extrabold text-xs mt-0.5 text-[var(--text)]">3/3 Canlı</div>
+              <div className="v mono font-extrabold text-xs mt-0.5 text-[var(--text)]">
+                {quality.liveCount}/{quality.total} Canlı
+              </div>
             </div>
             <div className="marketMini">
               <div className="l text-[9px] text-[var(--text-faint)] uppercase">Book Modu</div>
-              <div className="v mono font-extrabold text-xs mt-0.5 text-[var(--accent)]">{config.bookMode.toUpperCase()}</div>
+              <div className="v mono font-extrabold text-xs mt-0.5 text-[var(--accent)]">
+                {config.bookMode.toUpperCase()}
+              </div>
             </div>
             <div className="marketMini">
-              <div className="l text-[9px] text-[var(--text-faint)] uppercase">Fiyat Hassasiyeti</div>
-              <div className="v mono font-extrabold text-xs mt-0.5 text-[var(--bull)]">CANLI CANLI</div>
+              <div className="l text-[9px] text-[var(--text-faint)] uppercase">Veri Tazeliği</div>
+              <div className="v mono font-extrabold text-xs mt-0.5 text-[var(--bull)]">
+                %{quality.avgFreshness}
+              </div>
             </div>
           </div>
         </div>
@@ -69,7 +116,9 @@ export const MarketsTab: React.FC = () => {
                 </div>
                 <div className="exStat">
                   <div className="l text-[9px] text-[var(--text-faint)] uppercase">Spread</div>
-                  <div className="v mono font-bold text-[var(--text)]">{spreadBps ? `${spreadBps.toFixed(1)} bps` : '—'}</div>
+                  <div className="v mono font-bold text-[var(--text)]">
+                    {spreadBps ? `${spreadBps.toFixed(1)} bps` : '—'}
+                  </div>
                 </div>
                 <div className="exStat">
                   <div className="l text-[9px] text-[var(--text-faint)] uppercase">Sapma (Bps)</div>
@@ -85,7 +134,9 @@ export const MarketsTab: React.FC = () => {
                 </div>
                 <div className="exStat">
                   <div className="l text-[9px] text-[var(--text-faint)] uppercase">Gecikme</div>
-                  <div className="v mono font-bold text-[var(--text-dim)]">{ex.ts ? `${fmtAgo(Date.now() - ex.ts)} önce` : '—'}</div>
+                  <div className="v mono font-bold text-[var(--text-dim)]">
+                    {ex.ts ? `${fmtAgo(Date.now() - ex.ts)} önce` : '—'}
+                  </div>
                 </div>
               </div>
             </div>

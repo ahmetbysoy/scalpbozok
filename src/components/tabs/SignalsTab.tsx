@@ -33,7 +33,7 @@ export const SignalsTab: React.FC = () => {
       const b = sig.bias === 'bullish' ? 'bull' : sig.bias === 'bearish' ? 'bear' : 'warn';
       if (b !== biasFilter) return false;
     }
-    if (onlyVerified && !sig.verified) return false;
+    if (onlyVerified && !sig.verified?.hit) return false;
     if (onlyLiq && !isLiqSignal(sig)) return false;
     if (onlyHigh && (sig.confidence || 0) < 75) return false;
     return true;
@@ -83,7 +83,7 @@ export const SignalsTab: React.FC = () => {
         </div>
         <div className="chip flex-1 bg-[var(--panel)] border border-[var(--border)] rounded-lg p-1.5 text-center min-w-[70px]">
           <div className="n mono font-bold text-sm text-[var(--accent)]">
-            {rollingAccuracy ? `%${rollingAccuracy.dir || 75}` : '—'}
+            {rollingAccuracy?.dir != null ? `%${rollingAccuracy.dir}` : '—'}
           </div>
           <div className="l text-[9px] text-[var(--text-faint)] uppercase">doğruluk</div>
         </div>
@@ -104,7 +104,7 @@ export const SignalsTab: React.FC = () => {
         </div>
 
         <div className="filterChips flex gap-1">
-          <button onClick={() => setOnlyVerified(!onlyVerified)} className={`fchip text-[10.5px] font-bold px-2.5 py-1 rounded-full border border-[var(--border)] ${onlyVerified ? 'bg-[var(--accent)] text-black border-[var(--accent)]' : 'bg-[var(--panel2)] text-[var(--text-dim)]'}`}>✓ onaylı</button>
+          <button onClick={() => setOnlyVerified(!onlyVerified)} className={`fchip text-[10.5px] font-bold px-2.5 py-1 rounded-full border border-[var(--border)] ${onlyVerified ? 'bg-[var(--accent)] text-black border-[var(--accent)]' : 'bg-[var(--panel2)] text-[var(--text-dim)]'}`}>✓ isabet</button>
           <button onClick={() => setOnlyLiq(!onlyLiq)} className={`fchip text-[10.5px] font-bold px-2.5 py-1 rounded-full border border-[var(--border)] ${onlyLiq ? 'bg-[var(--accent)] text-black border-[var(--accent)]' : 'bg-[var(--panel2)] text-[var(--text-dim)]'}`}>⚡ liq</button>
           <button onClick={() => setOnlyHigh(!onlyHigh)} className={`fchip text-[10.5px] font-bold px-2.5 py-1 rounded-full border border-[var(--border)] ${onlyHigh ? 'bg-[var(--accent)] text-black border-[var(--accent)]' : 'bg-[var(--panel2)] text-[var(--text-dim)]'}`}>⭐ yüksek</button>
         </div>
