@@ -312,7 +312,8 @@ export class MetaStrategyEngine {
     multiExchange = true,
     exchanges: Record<string, any> = {},
     basePlan?: TradePlan | null,
-    manipulationIndex = 0
+    manipulationIndex = 0,
+    vpin: number | null = null
   ): TradePlan | null {
     const now = Date.now();
     const mid = bookData.mid;
@@ -320,10 +321,10 @@ export class MetaStrategyEngine {
 
     const strategies = [
       basePlan && basePlan.direction !== 'NEUTRAL' ? { ...basePlan } : null,
-      this.evalKaplanKapan(activePatterns, now, mid, symbol),
-      this.evalKelleAvcisi(activePatterns, now, mid, symbol),
-      this.evalBalinaTuzagi(activePatterns, now, mid, symbol),
-      this.evalIsikArbitraj(activePatterns, now, mid, symbol, multiExchange, exchanges)
+      this.evalKaplanKapan(activePatterns, now, mid, symbol, vpin),
+      this.evalKelleAvcisi(activePatterns, now, mid, symbol, vpin),
+      this.evalBalinaTuzagi(activePatterns, now, mid, symbol, vpin),
+      this.evalIsikArbitraj(activePatterns, now, mid, symbol, multiExchange, exchanges, vpin)
     ];
 
     let bestPlan: TradePlan | null = null;
@@ -364,7 +365,24 @@ export class MetaStrategyEngine {
     return bestPlan;
   }
 
-  evalKaplanKapan(patterns: PatternSignal[], now: number, mid: number, symbol: string): TradePlan | null {
+  // VPIN (toksisite) bazlı buffer genişletme — TradePlanGenerator.buffer ile
+  // aynı mantık. Ani sert hareket riskinde stop-out'u azaltır (maks +%50).
+  private adjustedBuffer(baseBuf: number, vpin: number | null): number {
+    if (vpin == null || !Number.isFinite(vpin)) return baseBuf;
+    const toxicity = clamp(Math.abs(vpin), 0, 100) / 100;
+    return baseBuf * (1 + toxicity * 0.5);
+  }
+
+  // Yüksek manip/spoof riski (WALL_PULL/SPOOF son 2 dk) — stratejiler
+  // bu bölgeye stop koyarken daha temkinli olmalı.
+  private recentSpoofPrices(patterns: PatternSignal[], now: number): number[] {
+    return patterns
+      .filter(p => (p.type === 'WALL_PULL' || p.type === 'SPOOF' || p.type === 'SPOOF TRAP') && now - p.createdAt < 120000)
+      .map(p => p.price)
+      .filter(Number.isFinite);
+  }
+
+  evalKaplanKapan(patterns: PatternSignal[], now: number, mid: number, symbol: string, vpin: number | null = null): TradePlan | null {
     const pull = patterns.find(p => (p.type === 'WALL_PULL' || p.type === 'SPOOF') && (p.metadata?.side === 'ask' || p.bias === 'bearish' || p.bias === 'warning') && now - p.createdAt < 60000);
     const voidUp = patterns.find(p => p.type === 'LIQUIDITY_VOID' && (p.bias === 'bullish' || p.bias === 'bull'));
     const flowBull = patterns.find(p => p.type === 'FLOW_BULL' || p.type === 'FLOW_REV_UP' || p.type === 'OFI_SPIKE');
@@ -380,10 +398,15 @@ export class MetaStrategyEngine {
     score = clamp(score, 0, 96);
 
     const tune = this.getSymbolTuning(symbol, mid);
-    const buf = tune.buf;
+    const buf = this.adjustedBuffer(tune.buf, vpin);
+    // Pull seviyesi yakın zamanda spoof olarak işaretlendiyse stop'u biraz
+    // daha aşağı (daha güvenli) çek.
+    const spoofRisk = pull
+      ? this.recentSpoofPrices(patterns, now).some(p => Math.abs(p - pull.price) <= buf)
+      : false;
     const e = pull ? pull.price : mid;
     const entry = { low: e - buf * 0.2, high: e + buf * 0.2, reasoning: 'Ask duvarının çekildiği/boşluk başlangıcı fiyattan giriş' };
-    const stopPrice = e - buf * 1.2;
+    const stopPrice = e - (spoofRisk ? buf * 1.5 : buf * 1.2);
     const tpPrice = voidUp && voidUp.zone ? voidUp.zone.high : e + buf * 3.0;
     const risk = Math.max(e - stopPrice, 1e-9);
     const rr1 = (tpPrice - e) / risk;
@@ -405,7 +428,7 @@ export class MetaStrategyEngine {
     };
   }
 
-  evalKelleAvcisi(patterns: PatternSignal[], now: number, mid: number, symbol: string): TradePlan | null {
+  evalKelleAvcisi(patterns: PatternSignal[], now: number, mid: number, symbol: string, vpin: number | null = null): TradePlan | null {
     const cascade = patterns.find(p => p.type === 'LIQUIDATION_CASCADE' && (p.bias === 'bearish' || p.bias === 'bear') && now - p.createdAt < 90000);
     const exh = patterns.find(p => p.type === 'LIQUIDATION_EXHAUSTION' && now - p.createdAt < 90000);
     const abs = patterns.find(p => (p.type === 'HIDDEN_ABSORPTION' || p.type === 'ABSORPTION' || p.type === 'ICEBERG') && (p.bias === 'bullish' || p.bias === 'bull') && now - p.createdAt < 90000);
@@ -419,10 +442,15 @@ export class MetaStrategyEngine {
     score = clamp(score, 0, 95);
 
     const tune = this.getSymbolTuning(symbol, mid);
-    const buf = tune.buf;
+    const buf = this.adjustedBuffer(tune.buf, vpin);
     const e = abs ? abs.price : mid;
+    // Emilim seviyesinin yakınında yeni spoof varsa stop'u biraz daha derine koy.
+    const spoofRisk = abs
+      ? this.recentSpoofPrices(patterns, now).some(p => Math.abs(p - abs.price) <= buf)
+      : false;
+    const stopMult = spoofRisk ? tune.kelleStopMult - 0.0015 : tune.kelleStopMult;
     const entry = { low: e - buf * 0.15, high: e + buf * 0.15, reasoning: 'Gizli alıcı emilim seviyesi (Iceberg/Absorption)' };
-    const stopPrice = e * tune.kelleStopMult;
+    const stopPrice = e * stopMult;
     const tp1Price = e + buf * 2.5;
     const tp2Price = e + buf * 4.5;
     const risk = Math.max(e - stopPrice, 1e-9);
@@ -434,7 +462,7 @@ export class MetaStrategyEngine {
       direction: 'LONG',
       confidence: score,
       entry,
-      stopLoss: { price: stopPrice, reasoning: `Emilim seviyesinin altı (Dar Stop @ %${((1 - tune.kelleStopMult) * 100).toFixed(2)})` },
+      stopLoss: { price: stopPrice, reasoning: `Emilim seviyesinin altı (Dar Stop @ %${((1 - stopMult) * 100).toFixed(2)}${spoofRisk ? ', spoof riski nedeniyle genişletildi' : ''})` },
       tp1: { price: tp1Price, reasoning: 'Şelale düşüşünün kırılım direnci' },
       tp2: { price: tp2Price, reasoning: 'İlk güçlü satıcı duvarı' },
       riskReward1: rr1,
@@ -445,7 +473,7 @@ export class MetaStrategyEngine {
     };
   }
 
-  evalBalinaTuzagi(patterns: PatternSignal[], now: number, mid: number, symbol: string): TradePlan | null {
+  evalBalinaTuzagi(patterns: PatternSignal[], now: number, mid: number, symbol: string, vpin: number | null = null): TradePlan | null {
     const smd = patterns.find(p => p.type === 'SMART_MONEY_DISTRIBUTION' && now - p.createdAt < 90000);
     const askIce = patterns.find(p => (p.type === 'ICEBERG' || p.type === 'STRONG_ASK_WALL') && p.price > mid && now - p.createdAt < 90000);
     const skew = patterns.find(p => p.type === 'BOOK_SKEW' && (p.bias === 'bearish' || p.bias === 'bear'));
@@ -460,10 +488,15 @@ export class MetaStrategyEngine {
     score = clamp(score, 0, 94);
 
     const tune = this.getSymbolTuning(symbol, mid);
-    const buf = tune.buf;
+    const buf = this.adjustedBuffer(tune.buf, vpin);
     const e = mid;
+    const spoofRisk = askIce
+      ? this.recentSpoofPrices(patterns, now).some(p => Math.abs(p - askIce.price) <= buf)
+      : false;
     const entry = { low: e - buf * 0.15, high: e + buf * 0.15, reasoning: 'Piyasa fiyatı (Flow aşağı dönüş)' };
-    const stopPrice = askIce ? askIce.price + buf * 0.5 : e + buf * 1.5;
+    const stopPrice = askIce
+      ? askIce.price + buf * (spoofRisk ? 0.8 : 0.5)
+      : e + buf * 1.5;
     const tp1Price = e - buf * 2.5;
     const tp2Price = e - buf * 4.5;
     const risk = Math.max(stopPrice - e, 1e-9);
@@ -486,12 +519,13 @@ export class MetaStrategyEngine {
     };
   }
 
-  evalIsikArbitraj(patterns: PatternSignal[], now: number, mid: number, symbol: string, multiExchange: boolean, exchanges: Record<string, any>): TradePlan | null {
+  evalIsikArbitraj(patterns: PatternSignal[], now: number, mid: number, symbol: string, multiExchange: boolean, exchanges: Record<string, any>, vpin: number | null = null): TradePlan | null {
     if (!multiExchange) return null;
     const binanceEx = exchanges.binance;
     if (!binanceEx || binanceEx.status !== 'live') return null;
 
     const tune = this.getSymbolTuning(symbol, mid);
+    const buf = this.adjustedBuffer(tune.buf, vpin);
 
     let bestLag: { name: string; mid: number; divBps: number } | null = null;
     let maxDiv = 0;
@@ -518,7 +552,6 @@ export class MetaStrategyEngine {
     if (ofi) score += 10;
     score = clamp(score, 0, 92);
 
-    const buf = tune.buf;
     const e = bestLag.mid;
     const entry = { low: e - buf * 0.1, high: e + buf * 0.1, reasoning: `${bestLag.name} geciken tahta fiyatı (${maxDiv > 0 ? '+' : ''}${maxDiv.toFixed(1)} bps sapma)` };
     const stopPrice = isLong ? e - buf * 1.2 : e + buf * 1.2;
