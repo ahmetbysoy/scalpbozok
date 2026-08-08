@@ -244,21 +244,36 @@ export interface StrategyPerformance {
 
 export type PositionOutcome = 'TP1' | 'TP2' | 'STOP' | 'TIMEOUT';
 
-export interface ClosedPosition {
+// Açık/henüz sonuçlanmamış plan.
+export interface TrackedPosition {
   id: string;
   strategyId: string;
   strategyName?: string;
   direction: 'LONG' | 'SHORT';
   entry: number;
-  stopPrice: number;
-  tp1Price: number | null;
-  tp2Price: number | null;
+  stopLoss: number;
+  tp1: number | null;
+  tp2: number | null;
   confidence: number;
+  rr1: number;
+  rr2: number;
   openedAt: number;
+}
+
+// Kapanmış pozisyon — istatistik bunun üzerinden üretilir.
+export type ClosedPosition = TrackedPosition & {
   closedAt: number;
   exitPrice: number;
   outcome: PositionOutcome;
   rMultiple: number;
+};
+
+export interface StrategyStat {
+  total: number;
+  wins: number;
+  // Timeout'lar hariç kesin sonuçlara göre win-rate; veri yoksa null.
+  winRate: number | null;
+  avgR: number;
 }
 
 export interface PositionStats {
@@ -266,11 +281,11 @@ export interface PositionStats {
   wins: number;
   losses: number;
   timeouts: number;
-  winRatePct: number | null;
-  avgR: number;
-  expectancyR: number;
-  byStrategy: Record<string, { total: number; wins: number; r: number }>;
-  recent: ClosedPosition[];
+  // Timeout'lar hariç; yeterli kesin sonuç yoksa null.
+  winRate: number | null;
+  avgR: number | null;
+  expectancy: number | null;
+  byStrategy: Record<string, StrategyStat>;
 }
 
 export interface MicroResult {

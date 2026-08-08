@@ -37,9 +37,9 @@ import {
   MicroResult,
   TabKey,
   HeatmapLayerKey,
+  TrackedPosition,
   ClosedPosition,
-  PositionStats,
-  PositionOutcome
+  PositionStats
 } from '../types';
 import { setSymbolPrecision } from '../utils/fmt';
 import { applyThemeStyle } from '../utils/theme';
@@ -250,141 +250,148 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // ----------------------------------------------------------------
   // TradePlan yaşam döngüsü takibi (SL/TP1/TP2 vuruşu, R-multiple).
-  // pendingPositions plan snapshot'ları tutar; her saniye mid fiyatla
-  // çözülür. Kapalı pozisyonlar positionStats'te birikir.
+  // Açık pozisyonlar her saniye mid fiyatla çözülür. Timeout'lar
+  // win-rate'e dahil edilmez; istatistik "kesin sonuç" üzerinden hesaplanır.
   // ----------------------------------------------------------------
-  const POSITION_TIMEOUT_MS = 180000; // 3 dk: hedeflerden hiçbiri vurulmazsa timeout
-  interface PendingPosition {
-    id: string;
-    strategyId: string;
-    strategyName?: string;
-    direction: 'LONG' | 'SHORT';
-    entry: number;
-    stopPrice: number;
-    tp1Price: number | null;
-    tp2Price: number | null;
-    confidence: number;
-    openedAt: number;
-  }
-  const pendingPositionsRef = useRef<PendingPosition[]>([]);
+  const POSITION_TIMEOUT_MS = 600000; // 10 dk: ne SL ne TP vurduysa timeout
+  const openPositionsRef = useRef<TrackedPosition[]>([]);
   const closedPositionsRef = useRef<ClosedPosition[]>([]);
   const [positionStats, setPositionStats] = useState<PositionStats>(() => ({
     total: 0, wins: 0, losses: 0, timeouts: 0,
-    winRatePct: null, avgR: 0, expectancyR: 0,
-    byStrategy: {}, recent: []
+    winRate: null, avgR: null, expectancy: null,
+    byStrategy: {}
   }));
   const lastPlanKeyRef = useRef<string>('');
 
   const computePositionStats = useCallback((closed: ClosedPosition[]): PositionStats => {
-    const byStrategy: Record<string, { total: number; wins: number; r: number }> = {};
-    let wins = 0, rSum = 0;
+    const byStrategy: Record<string, { total: number; wins: number; r: number; decisive: number }> = {};
+    let wins = 0;
+    let decisiveCount = 0;
+    let rSum = 0;
+
     for (const c of closed) {
       const sid = c.strategyId || 'DIRECTIONAL';
-      const s = byStrategy[sid] || (byStrategy[sid] = { total: 0, wins: 0, r: 0 });
+      const s = byStrategy[sid] || (byStrategy[sid] = { total: 0, wins: 0, r: 0, decisive: 0 });
+      const isWin = c.outcome === 'TP1' || c.outcome === 'TP2';
       s.total++;
       s.r += c.rMultiple;
-      if (c.outcome === 'TP1' || c.outcome === 'TP2') { wins++; s.wins++; }
+      if (c.outcome !== 'TIMEOUT') s.decisive++;
+      if (isWin) { wins++; s.wins++; }
+      if (c.outcome !== 'TIMEOUT') decisiveCount++;
       rSum += c.rMultiple;
     }
+
     const losses = closed.filter(c => c.outcome === 'STOP').length;
     const timeouts = closed.filter(c => c.outcome === 'TIMEOUT').length;
     const total = closed.length;
+    const avgR = total ? rSum / total : null;
+
+    const byStrategyOut: PositionStats['byStrategy'] = {};
+    for (const [sid, s] of Object.entries(byStrategy)) {
+      byStrategyOut[sid] = {
+        total: s.total,
+        wins: s.wins,
+        winRate: s.decisive ? Math.round((s.wins / s.decisive) * 100) : null,
+        avgR: s.total ? Math.round((s.r / s.total) * 100) / 100 : 0
+      };
+    }
+
     return {
-      total, wins, losses, timeouts,
-      winRatePct: total ? Math.round((wins / total) * 100) : null,
-      avgR: total ? rSum / total : 0,
-      expectancyR: total ? rSum / total : 0,
-      byStrategy,
-      recent: closed.slice(-10).reverse()
+      total,
+      wins,
+      losses,
+      timeouts,
+      winRate: decisiveCount ? Math.round((wins / decisiveCount) * 100) : null,
+      avgR: avgR == null ? null : Math.round(avgR * 100) / 100,
+      expectancy: avgR == null ? null : Math.round(avgR * 100) / 100,
+      byStrategy: byStrategyOut
     };
   }, []);
 
   const openPositionForPlan = useCallback((plan: TradePlan) => {
     if (plan.direction === 'NEUTRAL' || !plan.stopLoss || !plan.entry) return;
     const entry = (plan.entry.low + plan.entry.high) / 2;
-    const stopPrice = plan.stopLoss.price;
-    const tp1Price = plan.tp1 ? plan.tp1.price : null;
-    const tp2Price = plan.tp2 ? plan.tp2.price : null;
-    if (!Number.isFinite(entry) || !Number.isFinite(stopPrice) || entry === stopPrice) return;
+    const stopLoss = plan.stopLoss.price;
+    const tp1 = plan.tp1 ? plan.tp1.price : null;
+    const tp2 = plan.tp2 ? plan.tp2.price : null;
+    if (!Number.isFinite(entry) || !Number.isFinite(stopLoss) || entry === stopLoss) return;
+
     const strategyId = plan.strategyId || 'DIRECTIONAL';
-    // Aynı strateji için açık pozisyon varsa yeniden açma; üstüne yazmak yerine
-    // kullanıcı zaten aktif planı görüyor.
-    if (pendingPositionsRef.current.some(p => p.strategyId === strategyId)) return;
-    pendingPositionsRef.current.push({
+    // Aynı strateji için zaten açık pozisyon varsa yeniden açma.
+    if (openPositionsRef.current.some(p => p.strategyId === strategyId)) return;
+
+    const risk = Math.abs(entry - stopLoss) || 1e-9;
+    openPositionsRef.current.push({
       id: `pos_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       strategyId,
       strategyName: plan.strategyName,
       direction: plan.direction as 'LONG' | 'SHORT',
       entry,
-      stopPrice,
-      tp1Price,
-      tp2Price,
+      stopLoss,
+      tp1,
+      tp2,
       confidence: plan.confidence,
+      rr1: Number.isFinite(plan.riskReward1) ? plan.riskReward1 : (tp1 ? Math.abs(tp1 - entry) / risk : 0),
+      rr2: Number.isFinite(plan.riskReward2) ? plan.riskReward2 : (tp2 ? Math.abs(tp2 - entry) / risk : 1),
       openedAt: Date.now()
     });
+    openPositionsRef.current = openPositionsRef.current.slice(-40);
   }, []);
 
   const resolvePositions = useCallback((midPrice: number) => {
     if (!Number.isFinite(midPrice) || midPrice <= 0) return;
-    const pending = pendingPositionsRef.current;
-    if (!pending.length) return;
+    const open = openPositionsRef.current;
+    if (!open.length) return;
+
     const now = Date.now();
-    const keep: PendingPosition[] = [];
+    const keep: TrackedPosition[] = [];
     const newlyClosed: ClosedPosition[] = [];
 
-    for (const pos of pending) {
-      let outcome: PositionOutcome | null = null;
+    for (const pos of open) {
+      const isLong = pos.direction === 'LONG';
+      const risk = Math.abs(pos.entry - pos.stopLoss) || 1e-9;
+
+      let outcome: ClosedPosition['outcome'] | null = null;
       let exitPrice = midPrice;
-      const risk = Math.abs(pos.entry - pos.stopPrice);
+      let rMultiple = 0;
 
-      if (pos.direction === 'LONG') {
-        if (midPrice <= pos.stopPrice) { outcome = 'STOP'; exitPrice = pos.stopPrice; }
-        else if (pos.tp2Price != null && midPrice >= pos.tp2Price) { outcome = 'TP2'; exitPrice = pos.tp2Price; }
-        else if (pos.tp1Price != null && midPrice >= pos.tp1Price) { outcome = 'TP1'; exitPrice = pos.tp1Price; }
-      } else {
-        if (midPrice >= pos.stopPrice) { outcome = 'STOP'; exitPrice = pos.stopPrice; }
-        else if (pos.tp2Price != null && midPrice <= pos.tp2Price) { outcome = 'TP2'; exitPrice = pos.tp2Price; }
-        else if (pos.tp1Price != null && midPrice <= pos.tp1Price) { outcome = 'TP1'; exitPrice = pos.tp1Price; }
-      }
-
-      if (!outcome && now - pos.openedAt >= POSITION_TIMEOUT_MS) {
+      if (isLong ? midPrice <= pos.stopLoss : midPrice >= pos.stopLoss) {
+        outcome = 'STOP';
+        exitPrice = pos.stopLoss;
+        rMultiple = -1;
+      } else if (pos.tp2 != null && (isLong ? midPrice >= pos.tp2 : midPrice <= pos.tp2)) {
+        outcome = 'TP2';
+        exitPrice = pos.tp2;
+        rMultiple = pos.rr2;
+      } else if (pos.tp1 != null && (isLong ? midPrice >= pos.tp1 : midPrice <= pos.tp1)) {
+        outcome = 'TP1';
+        exitPrice = pos.tp1;
+        rMultiple = pos.rr1;
+      } else if (now - pos.openedAt >= POSITION_TIMEOUT_MS) {
         outcome = 'TIMEOUT';
         exitPrice = midPrice;
+        rMultiple = (isLong ? midPrice - pos.entry : pos.entry - midPrice) / risk;
       }
 
-      if (!outcome) { keep.push(pos); continue; }
+      if (!outcome) {
+        keep.push(pos);
+        continue;
+      }
 
-      const r = risk > 0
-        ? (pos.direction === 'LONG' ? (exitPrice - pos.entry) : (pos.entry - exitPrice)) / risk
-        : 0;
       newlyClosed.push({
-        id: pos.id,
-        strategyId: pos.strategyId,
-        strategyName: pos.strategyName,
-        direction: pos.direction,
-        entry: pos.entry,
-        stopPrice: pos.stopPrice,
-        tp1Price: pos.tp1Price,
-        tp2Price: pos.tp2Price,
-        confidence: pos.confidence,
-        openedAt: pos.openedAt,
+        ...pos,
         closedAt: now,
         exitPrice,
         outcome,
-        rMultiple: Math.round(r * 100) / 100
+        rMultiple: Math.round(rMultiple * 100) / 100
       });
 
-      // Gerçek performansı eski mock tracker yerine besle (bonus sistemi için).
+      // Strateji performans bonusunu gerçek sonuçtan besle.
       const hit = outcome === 'TP1' || outcome === 'TP2';
-      const rForTracker = outcome === 'TP2'
-        ? Math.max(pos.direction === 'LONG'
-            ? (pos.tp2Price! - pos.entry) / risk
-            : (pos.entry - pos.tp2Price!) / risk, 1)
-        : hit ? Math.max(r, 1) : -1;
-      perfTrackerRef.current.addTrade(pos.strategyId, hit, rForTracker);
+      perfTrackerRef.current.addTrade(pos.strategyId, hit, hit ? rMultiple : -1);
     }
 
-    pendingPositionsRef.current = keep;
+    openPositionsRef.current = keep;
     if (newlyClosed.length) {
       closedPositionsRef.current = [...closedPositionsRef.current, ...newlyClosed].slice(-200);
       setPositionStats(computePositionStats(closedPositionsRef.current));
