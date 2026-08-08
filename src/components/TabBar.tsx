@@ -14,7 +14,7 @@ export const TabBar: React.FC = () => {
     { key: 'signalsView', icon: '🎯', label: 'SIGNALS', badge: signalsFeed.length },
     { key: 'levelsView', icon: '📍', label: 'LEVELS' },
     { key: 'marketsView', icon: '🌐', label: 'MARKETS' },
-    { key: 'backtestView', icon: '🧪', label: 'BACKTEST' },
+    { key: 'backtestView', icon: '📊', label: 'PERF' },
     { key: 'settingsView', icon: '⚙️', label: 'SETTINGS' }
   ];
 

@@ -1,320 +1,174 @@
-// BOZOK PRO — BacktestTab Professional Zero-Lookahead Backtester Component
+// BOZOK PRO — Canlı Performans Paneli
+//
+// NOT: Sahte kline/mum backtest'i kaldırıldı. Mum verisi SPOOF, ICEBERG,
+// WALL_PULL, VPIN gibi mikro-yapı detektörlerini besleyecek geçmiş order book/tape
+// verisi içermediği için gerçek sistemi test edemiyordu ve kullanıcıyı yanıltıyordu.
+// Bu panel artık yalnızca canlı çalışan TradePlan sonuçlarını gösterir.
 
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { createChart, ColorType, CandlestickSeries, IChartApi } from 'lightweight-charts';
+import React, { useEffect, useRef } from 'react';
 import { useBozok } from '../../context/BozokContext';
-import { fmtPrice, fmtQty } from '../../utils/fmt';
 import { canvasPalette } from '../../utils/theme';
 
-interface BacktestTrade {
-  id: string;
-  entryTime: number;
-  exitTime: number;
-  symbol: string;
-  direction: 'LONG' | 'SHORT';
-  entryPrice: number;
-  stopLoss: number;
-  takeProfit: number;
-  exitPrice: number;
-  pnlR: number;
-  pnlUsd: number;
-  exitReason: 'TP' | 'SL' | 'TRAILING_STOP' | 'TIMEOUT';
-}
-
 export const BacktestTab: React.FC = () => {
-  const { symbol, lastPrice, activePatterns } = useBozok();
+  const { positionStats, perfTracker } = useBozok();
+  const equityCanvasRef = useRef<HTMLCanvasElement>(null);
 
-  const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartInstanceRef = useRef<IChartApi | null>(null);
-
-  const [isRunning, setIsRunning] = useState(false);
-  const [candles, setCandles] = useState<any[]>([]);
-  const [trades, setTrades] = useState<BacktestTrade[]>([]);
-  const [stats, setStats] = useState({
-    totalTrades: 0,
-    winRate: 0,
-    netProfitR: 0,
-    maxDrawdownR: 0,
-    profitFactor: 0,
-    sharpeRatio: 0,
-    expectancyR: 0
-  });
-
-  const [timeframe, setTimeframe] = useState<'1m' | '5m' | '15m'>('1m');
-  const [barCount, setBarCount] = useState<number>(300);
-
-  // Fetch real historical klines from Binance Futures for backtesting
-  const runBacktest = useCallback(async () => {
-    setIsRunning(true);
-    try {
-      const res = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${timeframe}&limit=${barCount}`);
-      const rawKlines = await res.json();
-
-      if (!Array.isArray(rawKlines)) {
-        setIsRunning(false);
-        return;
-      }
-
-      const formattedCandles = rawKlines.map((k: any) => ({
-        time: Math.floor(k[0] / 1000) as any,
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5])
-      }));
-
-      setCandles(formattedCandles);
-
-      // Execute Zero-Lookahead-Bias Backtest Simulation
-      const simulatedTrades: BacktestTrade[] = [];
-      let inTrade: { dir: 'LONG' | 'SHORT'; entry: number; sl: number; tp: number; entryTime: number } | null = null;
-      let cumulativeR = 0;
-
-      for (let i = 20; i < formattedCandles.length; i++) {
-        const candle = formattedCandles[i];
-        const prev1 = formattedCandles[i - 1];
-        const prev2 = formattedCandles[i - 2];
-
-        // 1. If currently in trade, check exit conditions sequentially
-        if (inTrade) {
-          let exitPrice = 0;
-          let exitReason: 'TP' | 'SL' | 'TRAILING_STOP' | 'TIMEOUT' | null = null;
-
-          if (inTrade.dir === 'LONG') {
-            if (candle.low <= inTrade.sl) {
-              exitPrice = inTrade.sl;
-              exitReason = 'SL';
-            } else if (candle.high >= inTrade.tp) {
-              exitPrice = inTrade.tp;
-              exitReason = 'TP';
-            }
-          } else {
-            if (candle.high >= inTrade.sl) {
-              exitPrice = inTrade.sl;
-              exitReason = 'SL';
-            } else if (candle.low <= inTrade.tp) {
-              exitPrice = inTrade.tp;
-              exitReason = 'TP';
-            }
-          }
-
-          if (exitReason) {
-            const riskDist = Math.abs(inTrade.entry - inTrade.sl) || 1;
-            const pnlPrice = inTrade.dir === 'LONG' ? exitPrice - inTrade.entry : inTrade.entry - exitPrice;
-            const pnlR = pnlPrice / riskDist;
-            const pnlUsd = pnlR * 10; // $10 risk per trade
-            cumulativeR += pnlR;
-
-            simulatedTrades.push({
-              id: `bt_${candle.time}_${i}`,
-              entryTime: inTrade.entryTime,
-              exitTime: candle.time * 1000,
-              symbol,
-              direction: inTrade.dir,
-              entryPrice: inTrade.entry,
-              stopLoss: inTrade.sl,
-              takeProfit: inTrade.tp,
-              exitPrice,
-              pnlR,
-              pnlUsd,
-              exitReason
-            });
-
-            inTrade = null;
-          }
-        }
-
-        // 2. If no trade active, check signal triggers
-        if (!inTrade) {
-          const bodyRange = Math.abs(candle.close - candle.open);
-          const totalRange = candle.high - candle.low || 1;
-
-          // Strong Wall / Absorption signal condition
-          if (bodyRange / totalRange > 0.65 && candle.volume > prev1.volume * 1.5) {
-            const isBullSignal = candle.close > candle.open;
-            const dir = isBullSignal ? 'LONG' : 'SHORT';
-            const entry = candle.close;
-            const sl = isBullSignal ? candle.low - bodyRange * 0.5 : candle.high + bodyRange * 0.5;
-            const tp = isBullSignal ? entry + (entry - sl) * 2.2 : entry - (sl - entry) * 2.2;
-
-            inTrade = { dir, entry, sl, tp, entryTime: candle.time * 1000 };
-          }
-        }
-      }
-
-      setTrades(simulatedTrades);
-
-      // Calculate Performance Metrics
-      if (simulatedTrades.length) {
-        const wins = simulatedTrades.filter(t => t.pnlR > 0);
-        const losses = simulatedTrades.filter(t => t.pnlR <= 0);
-        const winRate = (wins.length / simulatedTrades.length) * 100;
-        const grossWinR = wins.reduce((s, t) => s + t.pnlR, 0);
-        const grossLossR = Math.abs(losses.reduce((s, t) => s + t.pnlR, 0)) || 1;
-        const profitFactor = grossWinR / grossLossR;
-        const netProfitR = simulatedTrades.reduce((s, t) => s + t.pnlR, 0);
-
-        setStats({
-          totalTrades: simulatedTrades.length,
-          winRate,
-          netProfitR,
-          maxDrawdownR: 1.8,
-          profitFactor,
-          sharpeRatio: 1.85,
-          expectancyR: netProfitR / simulatedTrades.length
-        });
-      }
-    } catch (e) {
-    } finally {
-      setIsRunning(false);
-    }
-  }, [symbol, timeframe, barCount]);
+  const stats = perfTracker.getStats();
+  const strategyRows = Object.entries(positionStats.byStrategy).sort((a, b) => b[1].total - a[1].total);
 
   useEffect(() => {
-    runBacktest();
-  }, [runBacktest]);
+    const canvas = equityCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-  // Render Lightweight Chart
-  useEffect(() => {
-    if (!chartContainerRef.current || !candles.length) return;
+    const parent = canvas.parentElement;
+    const w = parent ? parent.clientWidth : 300;
+    const h = 120;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    if (chartInstanceRef.current) {
-      chartInstanceRef.current.remove();
-      chartInstanceRef.current = null;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#05070c';
+    ctx.fillRect(0, 0, w, h);
+
+    const curve = stats.curve || [0];
+    if (curve.length < 2) {
+      ctx.fillStyle = 'rgba(148,163,184,.65)';
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Henüz kapanmış gerçek pozisyon yok.', w / 2, h / 2 - 4);
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillText('Canlı planlar SL/TP vurduğunda eğri burada oluşur.', w / 2, h / 2 + 14);
+      ctx.textAlign = 'left';
+      return;
     }
 
-    const chart = createChart(chartContainerRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: '#03060d' },
-        textColor: '#94a3b8'
-      },
-      grid: {
-        vertLines: { color: 'rgba(148, 163, 184, 0.08)' },
-        horzLines: { color: 'rgba(148, 163, 184, 0.08)' }
-      },
-      crosshair: {
-        mode: 1
-      },
-      timeScale: {
-        borderColor: 'rgba(148, 163, 184, 0.15)',
-        timeVisible: true
-      }
+    const min = Math.min(0, ...curve);
+    const max = Math.max(1, ...curve);
+    const range = max - min || 1;
+    const pad = 10;
+    const getY = (v: number) => h - pad - ((v - min) / range) * (h - pad * 2);
+    const getX = (i: number) => (i / (curve.length - 1)) * w;
+
+    ctx.strokeStyle = 'rgba(148,163,184,.18)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, getY(0));
+    ctx.lineTo(w, getY(0));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    curve.forEach((v, i) => {
+      const x = getX(i);
+      const y = getY(v);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     });
-
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: canvasPalette.bull,
-      downColor: canvasPalette.bear,
-      borderVisible: false,
-      wickUpColor: canvasPalette.bull,
-      wickDownColor: canvasPalette.bear
-    });
-
-    candleSeries.setData(candles);
-    chartInstanceRef.current = chart;
-
-    const handleResize = () => {
-      if (chartContainerRef.current && chart) {
-        chart.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight
-        });
-      }
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      if (chartInstanceRef.current) {
-        chartInstanceRef.current.remove();
-        chartInstanceRef.current = null;
-      }
-    };
-  }, [candles]);
+    ctx.strokeStyle = curve[curve.length - 1] >= 0 ? canvasPalette.bull : canvasPalette.bear;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }, [stats, positionStats]);
 
   return (
     <div className="view active flex flex-col h-full overflow-hidden" id="backtestView">
       <div className="flex justify-between items-center p-2.5 bg-[var(--panel)] border-b border-[var(--border)] shrink-0">
-        <div className="font-bold text-xs text-[var(--text)] flex items-center gap-2">
-          <span>🧪 Sıfır-Gelecek-Görüşlü Backtest Simülatörü</span>
-        </div>
-        <div className="flex gap-2 items-center">
-          <select
-            value={timeframe}
-            onChange={(e) => setTimeframe(e.target.value as any)}
-            className="bg-[var(--panel2)] border border-[var(--border)] text-xs text-[var(--text)] rounded px-2 py-1"
-          >
-            <option value="1m">1 Dakika</option>
-            <option value="5m">5 Dakika</option>
-            <option value="15m">15 Dakika</option>
-          </select>
-
-          <button
-            onClick={runBacktest}
-            disabled={isRunning}
-            className="px-3 py-1 bg-[var(--accent)] text-black font-extrabold text-xs rounded hover:opacity-90 disabled:opacity-50"
-          >
-            {isRunning ? 'Hesaplanıyor...' : 'Yeniden Çalıştır ⚡'}
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-4 gap-2 p-2 shrink-0 bg-[var(--panel)] border-b border-[var(--border)]">
-        <div className="metricCard p-2 bg-[var(--panel2)] rounded border border-[var(--border)] text-center">
-          <div className="text-[9px] text-[var(--text-faint)] uppercase">Toplam İşlem</div>
-          <div className="mono font-extrabold text-sm text-[var(--text)]">{stats.totalTrades}</div>
-        </div>
-        <div className="metricCard p-2 bg-[var(--panel2)] rounded border border-[var(--border)] text-center">
-          <div className="text-[9px] text-[var(--text-faint)] uppercase">Kazanma Oranı (Win Rate)</div>
-          <div className="mono font-extrabold text-sm text-[var(--bull)]">%{stats.winRate.toFixed(1)}</div>
-        </div>
-        <div className="metricCard p-2 bg-[var(--panel2)] rounded border border-[var(--border)] text-center">
-          <div className="text-[9px] text-[var(--text-faint)] uppercase">Net Kâr (Net R)</div>
-          <div className={`mono font-extrabold text-sm ${stats.netProfitR >= 0 ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}`}>
-            {stats.netProfitR >= 0 ? '+' : ''}{stats.netProfitR.toFixed(1)}R
+        <div>
+          <div className="font-bold text-xs text-[var(--text)] flex items-center gap-2">
+            <span>📊 Canlı Performans</span>
+          </div>
+          <div className="text-[10px] text-[var(--text-faint)] mt-0.5">
+            Mum backtest’i kaldırıldı; bu panel gerçek SL/TP sonuçlarını gösterir.
           </div>
         </div>
-        <div className="metricCard p-2 bg-[var(--panel2)] rounded border border-[var(--border)] text-center">
-          <div className="text-[9px] text-[var(--text-faint)] uppercase">Profit Factor</div>
-          <div className="mono font-extrabold text-sm text-[var(--accent)]">{stats.profitFactor.toFixed(2)}</div>
-        </div>
       </div>
 
-      <div className="flex-1 min-h-0 relative bg-[#03060d]">
-        <div ref={chartContainerRef} className="w-full h-full" />
-      </div>
-
-      <div className="h-[140px] border-t border-[var(--border)] overflow-y-auto p-2 bg-[var(--panel)] shrink-0">
-        <div className="text-[10px] text-[var(--text-faint)] uppercase font-bold mb-1">
-          Simülasyon İşlem Kayıtları
+      <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <Metric label="Kapanan Poz." value={String(positionStats.total)} />
+          <Metric label="TP / Stop" value={`${positionStats.wins} / ${positionStats.losses}`} accent={positionStats.wins >= positionStats.losses ? 'bull' : 'bear'} />
+          <Metric label="Timeout" value={String(positionStats.timeouts)} accent="warn" />
+          <Metric
+            label="Win Rate"
+            value={positionStats.winRate == null ? '—' : `%${positionStats.winRate}`}
+            accent="accent"
+          />
+          <Metric
+            label="Ortalama R"
+            value={positionStats.avgR == null ? '—' : `${positionStats.avgR >= 0 ? '+' : ''}${positionStats.avgR.toFixed(2)}R`}
+            accent={positionStats.avgR != null && positionStats.avgR >= 0 ? 'bull' : 'bear'}
+          />
+          <Metric label="Net R (perf)" value={`${stats.netR >= 0 ? '+' : ''}${stats.netR.toFixed(2)}R`} accent={stats.netR >= 0 ? 'bull' : 'bear'} />
+          <Metric label="Profit Factor" value={stats.pf.toFixed(2)} accent="accent" />
+          <Metric label="Sharpe" value={stats.sharpe.toFixed(2)} />
         </div>
-        <table className="w-full text-[11px] mono text-left">
-          <thead>
-            <tr className="text-[9px] text-[var(--text-faint)] border-b border-[var(--border-soft)]">
-              <th className="p-1">Yön</th>
-              <th className="p-1">Giriş</th>
-              <th className="p-1">Stop</th>
-              <th className="p-1">Hedef</th>
-              <th className="p-1">Çıkış</th>
-              <th className="p-1">Sonuç R</th>
-              <th className="p-1">Neden</th>
-            </tr>
-          </thead>
-          <tbody>
-            {trades.map((t) => (
-              <tr key={t.id} className="border-b border-[var(--border-soft)]/50 hover:bg-white/5">
-                <td className={`p-1 font-bold ${t.direction === 'LONG' ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}`}>{t.direction}</td>
-                <td className="p-1">{fmtPrice(t.entryPrice)}</td>
-                <td className="p-1 text-[var(--bear)]">{fmtPrice(t.stopLoss)}</td>
-                <td className="p-1 text-[var(--bull)]">{fmtPrice(t.takeProfit)}</td>
-                <td className="p-1">{fmtPrice(t.exitPrice)}</td>
-                <td className={`p-1 font-bold ${t.pnlR >= 0 ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}`}>{t.pnlR >= 0 ? '+' : ''}{t.pnlR.toFixed(2)}R</td>
-                <td className="p-1 text-[var(--text-dim)]">{t.exitReason}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--panel)] p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10.5px] font-bold uppercase tracking-wider text-[var(--text-faint)]">Kümülatif R Eğrisi</span>
+            <span className="text-[10px] text-[var(--text-faint)]">Gerçek kapanan pozisyonlar</span>
+          </div>
+          <div className="h-[120px] rounded-lg overflow-hidden border border-[var(--border-soft)] bg-[#05070c]">
+            <canvas ref={equityCanvasRef} className="block w-full h-full" />
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--panel)] p-3">
+          <div className="text-[10.5px] font-bold uppercase tracking-wider text-[var(--text-faint)] mb-2">
+            Strateji Bazlı Performans
+          </div>
+          {strategyRows.length === 0 ? (
+            <div className="text-xs text-[var(--text-faint)] py-4 text-center">
+              Henüz strateji bazında kapanmış pozisyon yok.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {strategyRows.map(([id, s]) => (
+                <div key={id} className="grid grid-cols-4 gap-2 text-[11px] mono py-1.5 border-b border-[var(--border-soft)] last:border-b-0">
+                  <div className="truncate text-[var(--text)] font-bold">{id}</div>
+                  <div className="text-center text-[var(--text-dim)]">{s.total} işlem</div>
+                  <div className="text-center text-[var(--accent)]">{s.winRate == null ? '—' : `%${s.winRate}`}</div>
+                  <div className={`text-right font-bold ${s.avgR >= 0 ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}`}>
+                    {s.avgR >= 0 ? '+' : ''}{s.avgR.toFixed(2)}R
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 text-[11px] leading-relaxed text-[var(--text-dim)]">
+          <b className="text-amber-300">Neden klasik backtest yok?</b> Ücretsiz mum geçmişi,
+          gerçek mikro-yapı motorunun ihtiyaç duyduğu order book değişimleri, agresyon tarafı,
+          iceberg/spoof izleri ve VPIN verilerini içermiyor. Bu yüzden mumla yapılan “backtest”
+          sahte bir stratejiyi test ediyor olurdu. Canlı performans paneli ise gerçekten olanı kaydeder.
+        </div>
       </div>
+    </div>
+  );
+};
+
+const Metric: React.FC<{
+  label: string;
+  value: string;
+  accent?: 'bull' | 'bear' | 'warn' | 'accent';
+}> = ({ label, value, accent }) => {
+  const color =
+    accent === 'bull' ? 'text-[var(--bull)]' :
+    accent === 'bear' ? 'text-[var(--bear)]' :
+    accent === 'warn' ? 'text-[var(--signal)]' :
+    accent === 'accent' ? 'text-[var(--accent)]' :
+    'text-[var(--text)]';
+  return (
+    <div className="bg-[var(--panel2)] border border-[var(--border)] rounded-lg p-2 text-center">
+      <div className="text-[9px] text-[var(--text-faint)] uppercase">{label}</div>
+      <div className={`mt-0.5 text-sm font-extrabold mono ${color}`}>{value}</div>
     </div>
   );
 };
