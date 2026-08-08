@@ -718,7 +718,8 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             symbolRef.current,
             c.multiExchange,
             exchangesRef.current,
-            basePlan
+            basePlan,
+            manipIndex
           );
           const finalPlan = (metaPlan && metaPlan.confidence >= 75) ? metaPlan : basePlan;
           setTradePlan(finalPlan);

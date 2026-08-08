@@ -311,7 +311,8 @@ export class MetaStrategyEngine {
     symbol = 'BTCUSDT',
     multiExchange = true,
     exchanges: Record<string, any> = {},
-    basePlan?: TradePlan | null
+    basePlan?: TradePlan | null,
+    manipulationIndex = 0
   ): TradePlan | null {
     const now = Date.now();
     const mid = bookData.mid;
@@ -328,11 +329,17 @@ export class MetaStrategyEngine {
     let bestPlan: TradePlan | null = null;
     let maxConf = -1;
 
+    // Yüksek manip/spoof yoğunluğu tüm planların güvenini düşürür.
+    // 60 üstünde ceza başlar, 100'de maks. -20 puan uygulanır.
+    const manipulationPenalty = manipulationIndex > 60
+      ? -Math.min(20, ((manipulationIndex - 60) / 40) * 20)
+      : 0;
+
     for (const res of strategies) {
       if (!res || !res.strategyId) continue;
       const bonus = perfTracker.getStrategyBonus(res.strategyId);
       const before = res.confidence;
-      res.confidence = clamp(res.confidence + bonus, 0, 99);
+      res.confidence = clamp(res.confidence + bonus + manipulationPenalty, 0, 99);
       res.confidenceBonus = Math.round(res.confidence - before);
 
       const pools = this.liqSimulator.getPools(mid, 0, symbol);
