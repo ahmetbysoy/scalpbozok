@@ -242,6 +242,37 @@ export interface StrategyPerformance {
   profitFactor: number;
 }
 
+export type PositionOutcome = 'TP1' | 'TP2' | 'STOP' | 'TIMEOUT';
+
+export interface ClosedPosition {
+  id: string;
+  strategyId: string;
+  strategyName?: string;
+  direction: 'LONG' | 'SHORT';
+  entry: number;
+  stopPrice: number;
+  tp1Price: number | null;
+  tp2Price: number | null;
+  confidence: number;
+  openedAt: number;
+  closedAt: number;
+  exitPrice: number;
+  outcome: PositionOutcome;
+  rMultiple: number;
+}
+
+export interface PositionStats {
+  total: number;
+  wins: number;
+  losses: number;
+  timeouts: number;
+  winRatePct: number | null;
+  avgR: number;
+  expectancyR: number;
+  byStrategy: Record<string, { total: number; wins: number; r: number }>;
+  recent: ClosedPosition[];
+}
+
 export interface MicroResult {
   balance: number;
   riskPct?: number;

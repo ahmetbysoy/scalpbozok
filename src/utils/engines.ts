@@ -220,16 +220,8 @@ export class NarrativeEngine {
 }
 
 export class StrategyPerformanceTracker {
-  trades: { id: number; strat: string; hit: boolean; r: number; t: number }[] = [
-    { id: 1, strat: 'KAPLAN_KAPAN', hit: true, r: 1.8, t: Date.now() - 900000 },
-    { id: 2, strat: 'KELLE_AVCISI', hit: true, r: 1.6, t: Date.now() - 800000 },
-    { id: 3, strat: 'BALINA_TUZAGI', hit: false, r: -1.0, t: Date.now() - 700000 },
-    { id: 4, strat: 'KAPLAN_KAPAN', hit: true, r: 1.8, t: Date.now() - 600000 },
-    { id: 5, strat: 'ISIK_ARBITRAJ', hit: true, r: 1.4, t: Date.now() - 500000 },
-    { id: 6, strat: 'KELLE_AVCISI', hit: true, r: 1.6, t: Date.now() - 400000 },
-    { id: 7, strat: 'BALINA_TUZAGI', hit: true, r: 1.5, t: Date.now() - 300000 },
-    { id: 8, strat: 'KAPLAN_KAPAN', hit: true, r: 1.8, t: Date.now() - 200000 }
-  ];
+  // Gerçek işlemlerle dolar; mock/seed veri yok.
+  trades: { id: number; strat: string; hit: boolean; r: number; t: number }[] = [];
 
   addTrade(strategyId: string, hit: boolean, rValue = 1.6) {
     this.trades.push({

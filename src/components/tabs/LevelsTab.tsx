@@ -15,7 +15,8 @@ export const LevelsTab: React.FC = () => {
     lastPrice,
     setFocusPrice,
     setActiveTab,
-    perfTracker
+    perfTracker,
+    positionStats
   } = useBozok();
 
   const equityCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -238,7 +239,54 @@ export const LevelsTab: React.FC = () => {
           </div>
         </div>
 
-        {/* Section 4: Equity Curve */}
+        {/* Section 4: Gerçek pozisyon istatistikleri */}
+        <div className="sectionLabel text-[10.5px] text-[var(--text-faint)] uppercase tracking-wider font-bold">
+          Pozisyon Takibi (Canlı SL/TP Sonuçları)
+        </div>
+        <div className="planCard bg-[var(--panel)] border border-[var(--border)] rounded-xl p-3">
+          <div className="grid grid-cols-4 gap-2 text-center text-[10px] mono">
+            <div>
+              <div className="text-[var(--text-faint)]">Toplam</div>
+              <div className="text-sm font-bold text-[var(--text)]">{positionStats.total}</div>
+            </div>
+            <div>
+              <div className="text-[var(--text-faint)]">Kazanılan</div>
+              <div className="text-sm font-bold text-[var(--bull)]">{positionStats.wins}</div>
+            </div>
+            <div>
+              <div className="text-[var(--text-faint)]">Stop</div>
+              <div className="text-sm font-bold text-[var(--bear)]">{positionStats.losses}</div>
+            </div>
+            <div>
+              <div className="text-[var(--text-faint)]">Win%</div>
+              <div className="text-sm font-bold text-[var(--accent)]">
+                {positionStats.winRatePct == null ? '—' : `%${positionStats.winRatePct}`}
+              </div>
+            </div>
+          </div>
+          <div className="mt-2 flex justify-between text-[10px] mono">
+            <span className="text-[var(--text-faint)]">Ortalama R</span>
+            <b className={positionStats.avgR >= 0 ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}>
+              {positionStats.avgR.toFixed(2)}R
+            </b>
+          </div>
+          {positionStats.recent.length > 0 && (
+            <div className="mt-2 space-y-1 max-h-[120px] overflow-y-auto">
+              {positionStats.recent.map(pos => (
+                <div key={pos.id} className="flex items-center justify-between text-[10px] mono border-t border-[var(--border-soft)] pt-1">
+                  <span className="truncate text-[var(--text-dim)]">
+                    {pos.strategyId || 'DIRECTIONAL'} · {pos.direction}
+                  </span>
+                  <span className={pos.outcome === 'STOP' ? 'text-[var(--bear)]' : pos.outcome === 'TIMEOUT' ? 'text-[var(--signal)]' : 'text-[var(--bull)]'}>
+                    {pos.outcome} {pos.rMultiple >= 0 ? '+' : ''}{pos.rMultiple.toFixed(2)}R
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Section 5: Equity Curve */}
         <div className="sectionLabel text-[10.5px] text-[var(--text-faint)] uppercase tracking-wider font-bold">
           Strateji Performans ve Kâr Eğrisi (Equity Curve)
         </div>

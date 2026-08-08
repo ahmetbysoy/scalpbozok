@@ -36,7 +36,10 @@ import {
   FlowCandle,
   MicroResult,
   TabKey,
-  HeatmapLayerKey
+  HeatmapLayerKey,
+  ClosedPosition,
+  PositionStats,
+  PositionOutcome
 } from '../types';
 import { setSymbolPrecision } from '../utils/fmt';
 import { applyThemeStyle } from '../utils/theme';
@@ -161,6 +164,7 @@ interface SignalSlice {
   sigCounts: { bull: number; bear: number; warn: number };
   manipIndex: number;
   rollingAccuracy: RollingAccuracy | null;
+  positionStats: PositionStats;
 }
 
 interface UISlice {
@@ -243,6 +247,150 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [microResult, setMicroResult] = useState<MicroResult | null>(null);
   const [sigCounts, setSigCounts] = useState<{ bull: number; bear: number; warn: number }>({ bull: 0, bear: 0, warn: 0 });
   const [rollingAccuracy, setRollingAccuracy] = useState<RollingAccuracy | null>(null);
+
+  // ----------------------------------------------------------------
+  // TradePlan yaşam döngüsü takibi (SL/TP1/TP2 vuruşu, R-multiple).
+  // pendingPositions plan snapshot'ları tutar; her saniye mid fiyatla
+  // çözülür. Kapalı pozisyonlar positionStats'te birikir.
+  // ----------------------------------------------------------------
+  const POSITION_TIMEOUT_MS = 180000; // 3 dk: hedeflerden hiçbiri vurulmazsa timeout
+  interface PendingPosition {
+    id: string;
+    strategyId: string;
+    strategyName?: string;
+    direction: 'LONG' | 'SHORT';
+    entry: number;
+    stopPrice: number;
+    tp1Price: number | null;
+    tp2Price: number | null;
+    confidence: number;
+    openedAt: number;
+  }
+  const pendingPositionsRef = useRef<PendingPosition[]>([]);
+  const closedPositionsRef = useRef<ClosedPosition[]>([]);
+  const [positionStats, setPositionStats] = useState<PositionStats>(() => ({
+    total: 0, wins: 0, losses: 0, timeouts: 0,
+    winRatePct: null, avgR: 0, expectancyR: 0,
+    byStrategy: {}, recent: []
+  }));
+  const lastPlanKeyRef = useRef<string>('');
+
+  const computePositionStats = useCallback((closed: ClosedPosition[]): PositionStats => {
+    const byStrategy: Record<string, { total: number; wins: number; r: number }> = {};
+    let wins = 0, rSum = 0;
+    for (const c of closed) {
+      const sid = c.strategyId || 'DIRECTIONAL';
+      const s = byStrategy[sid] || (byStrategy[sid] = { total: 0, wins: 0, r: 0 });
+      s.total++;
+      s.r += c.rMultiple;
+      if (c.outcome === 'TP1' || c.outcome === 'TP2') { wins++; s.wins++; }
+      rSum += c.rMultiple;
+    }
+    const losses = closed.filter(c => c.outcome === 'STOP').length;
+    const timeouts = closed.filter(c => c.outcome === 'TIMEOUT').length;
+    const total = closed.length;
+    return {
+      total, wins, losses, timeouts,
+      winRatePct: total ? Math.round((wins / total) * 100) : null,
+      avgR: total ? rSum / total : 0,
+      expectancyR: total ? rSum / total : 0,
+      byStrategy,
+      recent: closed.slice(-10).reverse()
+    };
+  }, []);
+
+  const openPositionForPlan = useCallback((plan: TradePlan) => {
+    if (plan.direction === 'NEUTRAL' || !plan.stopLoss || !plan.entry) return;
+    const entry = (plan.entry.low + plan.entry.high) / 2;
+    const stopPrice = plan.stopLoss.price;
+    const tp1Price = plan.tp1 ? plan.tp1.price : null;
+    const tp2Price = plan.tp2 ? plan.tp2.price : null;
+    if (!Number.isFinite(entry) || !Number.isFinite(stopPrice) || entry === stopPrice) return;
+    const strategyId = plan.strategyId || 'DIRECTIONAL';
+    // Aynı strateji için açık pozisyon varsa yeniden açma; üstüne yazmak yerine
+    // kullanıcı zaten aktif planı görüyor.
+    if (pendingPositionsRef.current.some(p => p.strategyId === strategyId)) return;
+    pendingPositionsRef.current.push({
+      id: `pos_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      strategyId,
+      strategyName: plan.strategyName,
+      direction: plan.direction as 'LONG' | 'SHORT',
+      entry,
+      stopPrice,
+      tp1Price,
+      tp2Price,
+      confidence: plan.confidence,
+      openedAt: Date.now()
+    });
+  }, []);
+
+  const resolvePositions = useCallback((midPrice: number) => {
+    if (!Number.isFinite(midPrice) || midPrice <= 0) return;
+    const pending = pendingPositionsRef.current;
+    if (!pending.length) return;
+    const now = Date.now();
+    const keep: PendingPosition[] = [];
+    const newlyClosed: ClosedPosition[] = [];
+
+    for (const pos of pending) {
+      let outcome: PositionOutcome | null = null;
+      let exitPrice = midPrice;
+      const risk = Math.abs(pos.entry - pos.stopPrice);
+
+      if (pos.direction === 'LONG') {
+        if (midPrice <= pos.stopPrice) { outcome = 'STOP'; exitPrice = pos.stopPrice; }
+        else if (pos.tp2Price != null && midPrice >= pos.tp2Price) { outcome = 'TP2'; exitPrice = pos.tp2Price; }
+        else if (pos.tp1Price != null && midPrice >= pos.tp1Price) { outcome = 'TP1'; exitPrice = pos.tp1Price; }
+      } else {
+        if (midPrice >= pos.stopPrice) { outcome = 'STOP'; exitPrice = pos.stopPrice; }
+        else if (pos.tp2Price != null && midPrice <= pos.tp2Price) { outcome = 'TP2'; exitPrice = pos.tp2Price; }
+        else if (pos.tp1Price != null && midPrice <= pos.tp1Price) { outcome = 'TP1'; exitPrice = pos.tp1Price; }
+      }
+
+      if (!outcome && now - pos.openedAt >= POSITION_TIMEOUT_MS) {
+        outcome = 'TIMEOUT';
+        exitPrice = midPrice;
+      }
+
+      if (!outcome) { keep.push(pos); continue; }
+
+      const r = risk > 0
+        ? (pos.direction === 'LONG' ? (exitPrice - pos.entry) : (pos.entry - exitPrice)) / risk
+        : 0;
+      newlyClosed.push({
+        id: pos.id,
+        strategyId: pos.strategyId,
+        strategyName: pos.strategyName,
+        direction: pos.direction,
+        entry: pos.entry,
+        stopPrice: pos.stopPrice,
+        tp1Price: pos.tp1Price,
+        tp2Price: pos.tp2Price,
+        confidence: pos.confidence,
+        openedAt: pos.openedAt,
+        closedAt: now,
+        exitPrice,
+        outcome,
+        rMultiple: Math.round(r * 100) / 100
+      });
+
+      // Gerçek performansı eski mock tracker yerine besle (bonus sistemi için).
+      const hit = outcome === 'TP1' || outcome === 'TP2';
+      const rForTracker = outcome === 'TP2'
+        ? Math.max(pos.direction === 'LONG'
+            ? (pos.tp2Price! - pos.entry) / risk
+            : (pos.entry - pos.tp2Price!) / risk, 1)
+        : hit ? Math.max(r, 1) : -1;
+      perfTrackerRef.current.addTrade(pos.strategyId, hit, rForTracker);
+    }
+
+    pendingPositionsRef.current = keep;
+    if (newlyClosed.length) {
+      closedPositionsRef.current = [...closedPositionsRef.current, ...newlyClosed].slice(-200);
+      setPositionStats(computePositionStats(closedPositionsRef.current));
+    }
+  }, [computePositionStats]);
+
   // manipIndex: son 60 saniyedeki duvar çekme/spoof yoğunluğundan türetilir.
   // Sabit gösterim yerine gerçek sinyal akışı kullanılır; mock veri yoktur.
   const manipIndex = useMemo(() => {
@@ -563,6 +711,23 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const finalPlan = (metaPlan && metaPlan.confidence >= 75) ? metaPlan : basePlan;
           setTradePlan(finalPlan);
 
+          // Yeni bir plan geldiğinde, kimlik değiştiyse pozisyon aç.
+          if (finalPlan && finalPlan.direction !== 'NEUTRAL' && finalPlan.entry && finalPlan.stopLoss) {
+            const planKey = [
+              finalPlan.strategyId || 'DIR',
+              finalPlan.direction,
+              Math.round((finalPlan.entry.low + finalPlan.entry.high) / 2),
+              Math.round(finalPlan.stopLoss.price),
+              Math.round(finalPlan.confidence / 5)
+            ].join(':');
+            if (planKey !== lastPlanKeyRef.current) {
+              lastPlanKeyRef.current = planKey;
+              openPositionForPlan(finalPlan);
+            }
+          } else {
+            lastPlanKeyRef.current = '';
+          }
+
           if (finalPlan && finalPlan.entry && finalPlan.stopLoss) {
             const entryAvg = (finalPlan.entry.low + finalPlan.entry.high) / 2;
             const res = microOptRef.current.calculate(
@@ -876,9 +1041,12 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const evaluate = () => {
       timer = null;
       const now = Date.now();
-      const pending = pendingVerifyRef.current;
-      if (!pending.length) return;
 
+      // 1) TradePlan yaşam döngüsü: her saniye SL/TP/timeout kontrolü.
+      if (lastPriceRef.current != null) resolvePositions(lastPriceRef.current);
+
+      // 2) Pattern doğrulama (yön isabeti, 45sn horizon).
+      const pending = pendingVerifyRef.current;
       const remaining: PatternSignal[] = [];
       let changed = false;
 
@@ -948,8 +1116,8 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const signalValue = useMemo<SignalSlice>(() => ({
     activePatterns, signalsFeed, tradePlan, narrative, microResult,
-    sigCounts, manipIndex, rollingAccuracy
-  }), [activePatterns, signalsFeed, tradePlan, narrative, microResult, sigCounts, manipIndex, rollingAccuracy]);
+    sigCounts, manipIndex, rollingAccuracy, positionStats
+  }), [activePatterns, signalsFeed, tradePlan, narrative, microResult, sigCounts, manipIndex, rollingAccuracy, positionStats]);
 
   const uiValue = useMemo<UISlice>(() => ({
     activeTab, setActiveTab, focusPrice, setFocusPrice, isReplaying
