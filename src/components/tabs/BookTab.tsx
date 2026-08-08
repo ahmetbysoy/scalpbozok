@@ -39,6 +39,7 @@ export const BookTab: React.FC = () => {
   const [draggingLine, setDraggingLine] = useState<'inv' | 'tp1' | 'tp2' | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number; price: number; timeAgoSec: number; qtyAtPrice: number } | null>(null);
   const [pinnedAlerts, setPinnedAlerts] = useState<PinnedAlert[]>([]);
+  const [layerBarOpen, setLayerBarOpen] = useState(false); // varsayılan kapalı: chart alanından yer çalmasın
 
   // Parmakla yakınlaştırma (pinch-to-zoom). 1 = otomatik sığdırma.
   // Çift dokunuşla otomatik moda geri döner.
@@ -159,6 +160,21 @@ export const BookTab: React.FC = () => {
     // --------------------------------------------------------------
     type Rect = { x: number; y: number; w: number; h: number };
     const placed: Rect[] = [];
+
+    // Sol üstteki DOM HUD şeridini (60s Pencere / Range / Veri Akışı) rezerve et —
+    // bu bir absolute-positioned overlay, canvas'ın kendisi bilmiyor. Diğer
+    // canvas etiketleri (SATICI/ALICI/POC vb.) bu bölgeye binmesin.
+    {
+      ctx.font = '700 10px monospace';
+      const hudTexts = [
+        `${config.heatmapWindowSec}s Pencere`,
+        `±${fmtPrice((lastPrice || 0) * 0.005)} Range`,
+        'Veri Akışı Aktif'
+      ];
+      let hudW = 16;
+      hudTexts.forEach(t => { hudW += ctx.measureText(t).width + 22; });
+      placed.push({ x: 0, y: 0, w: Math.min(mainCanvasW, hudW), h: 36 });
+    }
 
     // Canlı fiyat kutusu alanını en başta rezerve et — diğer tüm etiketler
     // (iceberg, spoof, pattern, SL/TP, fiyat ekseni) bu bölgeden otomatik kaçınır.
@@ -403,9 +419,10 @@ export const BookTab: React.FC = () => {
         ctx.lineTo(w - cobWidth, pocY);
         ctx.stroke();
 
-        ctx.font = '800 9px monospace';
-        ctx.fillStyle = '#f59e0b';
-        ctx.fillText(`POC ${fmtPrice(vpvrData.pocPrice)}`, vpvrX + 4, pocY - 4);
+        // POC etiketi üst HUD alanına binmesin; pill'i collision
+        // registry'den geçir (4px aşağıdan itibaren, min 18px).
+        const pocLabelY = Math.max(18, pocY);
+        drawPill(vpvrX + 4, pocLabelY, `POC ${fmtPrice(vpvrData.pocPrice)}`, '#f59e0b', '800 9px monospace', 'left');
       }
     }
 
@@ -743,56 +760,70 @@ export const BookTab: React.FC = () => {
 
   return (
     <div className="view active flex flex-col h-full overflow-hidden bg-[#030509]" id="bookView">
-      {/* Top Layer Control Bar — mobilde 4 sütun x 2 satır, masaüstünde tek satır */}
-      <div className="layerBar grid grid-cols-4 sm:flex sm:flex-wrap gap-1.5 p-2 bg-[#050810] border-b border-[var(--border)] shrink-0 items-center">
-        <span className="hidden sm:inline text-[10px] font-bold tracking-wider text-[var(--accent)] uppercase mr-1 col-span-4 sm:col-span-1 self-center">Katmanlar:</span>
+      {/* İnce, açılır/kapanır katman çubuğu — varsayılan kapalı, chart alanından yer çalmaz */}
+      <div className="shrink-0 bg-[#050810] border-b border-[var(--border)]">
         <button
-          onClick={() => toggleLayer('liquidity')}
-          className={`layerBtn text-[11px] px-3 py-1.5 min-h-[44px] rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('liquidity') ? 'text-black bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
+          onClick={() => setLayerBarOpen(o => !o)}
+          aria-expanded={layerBarOpen}
+          className="w-full flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold text-[var(--text-dim)] uppercase tracking-wider"
         >
-          Likidite
+          <span className={`inline-block transition-transform ${layerBarOpen ? 'rotate-90' : ''}`}>▸</span>
+          Katmanlar
+          <span className="text-[var(--accent)]">({activeLayers.size})</span>
         </button>
-        <button
-          onClick={() => toggleLayer('trades')}
-          className={`layerBtn text-[11px] px-3 py-1.5 min-h-[44px] rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('trades') ? 'text-black bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
-        >
-          İşlemler
-        </button>
-        <button
-          onClick={() => toggleLayer('spoofing')}
-          className={`layerBtn text-[11px] px-3 py-1.5 min-h-[44px] rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('spoofing') ? 'text-black bg-amber-400 border-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
-          title="Sahte Emir / Duvar İptalleri Radar Katmanı"
-        >
-          👻 Spoof
-        </button>
-        <button
-          onClick={() => toggleLayer('iceberg')}
-          className={`layerBtn text-[11px] px-3 py-1.5 min-h-[44px] rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('iceberg') ? 'text-black bg-sky-400 border-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
-          title="Gizli Buzdağı Emir Emilim Tespiti"
-        >
-          🧊 Iceberg
-        </button>
-        <button
-          onClick={() => toggleLayer('vpvr')}
-          className={`layerBtn text-[11px] px-3 py-1.5 min-h-[44px] rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('vpvr') ? 'text-black bg-emerald-400 border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
-          title="Fiyat Seviyesine Göre Hacim Profili (VPVR & POC)"
-        >
-          📊 VPVR
-        </button>
-        <button
-          onClick={() => toggleLayer('crosshair')}
-          className={`layerBtn text-[11px] px-3 py-1.5 min-h-[44px] rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('crosshair') ? 'text-black bg-purple-400 border-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.5)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
-          title="Mikro-Yapı Dedektör İmleci"
-        >
-          🎯 İmleç
-        </button>
-        <button
-          onClick={() => toggleLayer('liqpools')}
-          className={`layerBtn text-[11px] px-3 py-1.5 min-h-[44px] rounded-full border border-[var(--border)] font-bold transition-all truncate ${activeLayers.has('liqpools') ? 'text-black bg-[var(--accent)] border-[var(--accent)]' : 'text-[var(--text-dim)] bg-[var(--panel2)]'}`}
-          title="Kaldıraçlı Tasfiye Havuzları"
-        >
-          💧 Liq
-        </button>
+        {layerBarOpen && (
+          <div className="layerBar flex gap-1.5 px-2.5 pb-2 overflow-x-auto items-center">
+            <button
+              onClick={() => toggleLayer('liquidity')}
+              title="Likidite Isısı"
+              aria-label="Likidite Isısı"
+              aria-pressed={activeLayers.has('liquidity')}
+              className={`w-9 h-9 shrink-0 flex items-center justify-center text-base rounded-lg border border-[var(--border)] transition-all ${activeLayers.has('liquidity') ? 'bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'bg-[var(--panel2)]'}`}
+            >🌊</button>
+            <button
+              onClick={() => toggleLayer('trades')}
+              title="İşlem Baloncukları"
+              aria-label="İşlem Baloncukları"
+              aria-pressed={activeLayers.has('trades')}
+              className={`w-9 h-9 shrink-0 flex items-center justify-center text-base rounded-lg border border-[var(--border)] transition-all ${activeLayers.has('trades') ? 'bg-[var(--accent)] border-[var(--accent)] shadow-[0_0_8px_rgba(31,214,122,0.4)]' : 'bg-[var(--panel2)]'}`}
+            >💬</button>
+            <button
+              onClick={() => toggleLayer('spoofing')}
+              title="Sahte Emir / Duvar İptalleri Radar Katmanı"
+              aria-label="Spoof Radar"
+              aria-pressed={activeLayers.has('spoofing')}
+              className={`w-9 h-9 shrink-0 flex items-center justify-center text-base rounded-lg border border-[var(--border)] transition-all ${activeLayers.has('spoofing') ? 'bg-amber-400 border-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'bg-[var(--panel2)]'}`}
+            >👻</button>
+            <button
+              onClick={() => toggleLayer('iceberg')}
+              title="Gizli Buzdağı Emir Emilim Tespiti"
+              aria-label="Iceberg"
+              aria-pressed={activeLayers.has('iceberg')}
+              className={`w-9 h-9 shrink-0 flex items-center justify-center text-base rounded-lg border border-[var(--border)] transition-all ${activeLayers.has('iceberg') ? 'bg-sky-400 border-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.5)]' : 'bg-[var(--panel2)]'}`}
+            >🧊</button>
+            <button
+              onClick={() => toggleLayer('vpvr')}
+              title="Fiyat Seviyesine Göre Hacim Profili (VPVR & POC)"
+              aria-label="VPVR"
+              aria-pressed={activeLayers.has('vpvr')}
+              className={`w-9 h-9 shrink-0 flex items-center justify-center text-base rounded-lg border border-[var(--border)] transition-all ${activeLayers.has('vpvr') ? 'bg-emerald-400 border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 'bg-[var(--panel2)]'}`}
+            >📊</button>
+            <button
+              onClick={() => toggleLayer('crosshair')}
+              title="Mikro-Yapı Dedektör İmleci"
+              aria-label="İmleç"
+              aria-pressed={activeLayers.has('crosshair')}
+              className={`w-9 h-9 shrink-0 flex items-center justify-center text-base rounded-lg border border-[var(--border)] transition-all ${activeLayers.has('crosshair') ? 'bg-purple-400 border-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.5)]' : 'bg-[var(--panel2)]'}`}
+            >🎯</button>
+            <button
+              onClick={() => toggleLayer('liqpools')}
+              title="Kaldıraçlı Tasfiye Havuzları"
+              aria-label="Liq Havuzları"
+              aria-pressed={activeLayers.has('liqpools')}
+              className={`w-9 h-9 shrink-0 flex items-center justify-center text-base rounded-lg border border-[var(--border)] transition-all ${activeLayers.has('liqpools') ? 'bg-[var(--accent)] border-[var(--accent)]' : 'bg-[var(--panel2)]'}`}
+            >💧</button>
+          </div>
+        )}
       </div>
 
       {/* Live Microstructure Event Ticker Top Banner */}
