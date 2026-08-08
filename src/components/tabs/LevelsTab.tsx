@@ -157,6 +157,15 @@ export const LevelsTab: React.FC = () => {
             </span>
           </div>
 
+          <div className="planRow flex justify-between items-center py-1.5 border-b border-[var(--border-soft)] text-xs">
+            <span className="text-[var(--text-dim)]">Performans Bonusu</span>
+            <span className={`v font-bold ${(tradePlan?.confidenceBonus ?? 0) > 0 ? 'text-[var(--bull)]' : (tradePlan?.confidenceBonus ?? 0) < 0 ? 'text-[var(--bear)]' : 'text-[var(--text-dim)]'}`}>
+              {tradePlan && tradePlan.confidenceBonus != null
+                ? (tradePlan.confidenceBonus >= 0 ? `🔺 +${tradePlan.confidenceBonus}` : `🔻 ${tradePlan.confidenceBonus}`)
+                : '—'}
+            </span>
+          </div>
+
           <div className="planRow flex justify-between items-center py-1.5 text-xs">
             <span className="text-[var(--text-dim)]">Gerekçe</span>
             <span className="v text-[11px] text-[var(--text-dim)] text-right font-medium max-w-[65%]">

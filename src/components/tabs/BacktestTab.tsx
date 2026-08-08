@@ -6,11 +6,13 @@
 // Bu panel artık yalnızca canlı çalışan TradePlan sonuçlarını gösterir.
 
 import React, { useEffect, useRef } from 'react';
-import { useBozok } from '../../context/BozokContext';
+import { useBozok, useBozokLive } from '../../context/BozokContext';
+import { fmtPrice } from '../../utils/fmt';
 import { canvasPalette } from '../../utils/theme';
 
 export const BacktestTab: React.FC = () => {
-  const { positionStats, perfTracker } = useBozok();
+  const { positionStats, openPositions, perfTracker } = useBozok();
+  const { lastPrice } = useBozokLive();
   const equityCanvasRef = useRef<HTMLCanvasElement>(null);
 
   const stats = perfTracker.getStats();
@@ -139,6 +141,50 @@ export const BacktestTab: React.FC = () => {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--panel)] p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10.5px] font-bold uppercase tracking-wider text-[var(--text-faint)]">
+              Şu An Takip Edilen Pozisyonlar
+            </span>
+            <span className="text-[10px] mono text-[var(--text-faint)]">{openPositions.length} açık</span>
+          </div>
+          {openPositions.length === 0 ? (
+            <div className="text-xs text-[var(--text-faint)] py-3 text-center">
+              Aktif pozisyon yok.
+            </div>
+          ) : (
+            <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
+              {openPositions.map(pos => {
+                const risk = Math.abs(pos.entry - pos.stopLoss) || 1;
+                const curR = lastPrice
+                  ? (pos.direction === 'LONG' ? lastPrice - pos.entry : pos.entry - lastPrice) / risk
+                  : 0;
+                const aged = (Date.now() - pos.openedAt) / 1000;
+                const isBull = pos.direction === 'LONG';
+                return (
+                  <div key={pos.id} className="grid grid-cols-5 gap-2 items-center text-[11px] mono py-1.5 border-b border-[var(--border-soft)] last:border-b-0">
+                    <div className="truncate">
+                      <span className={`font-bold ${isBull ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}`}>
+                        {isBull ? '▲ LONG' : '▼ SHORT'}
+                      </span>
+                      <div className="text-[9px] text-[var(--text-faint)] truncate">
+                        {pos.strategyId || 'DIRECTIONAL'}
+                      </div>
+                    </div>
+                    <div className="text-center text-[var(--text-dim)]">{fmtPrice(pos.entry)}</div>
+                    <div className="text-center text-[var(--bull)]">{pos.tp1 ? fmtPrice(pos.tp1) : '—'}</div>
+                    <div className="text-center text-[var(--bear)]">{fmtPrice(pos.stopLoss)}</div>
+                    <div className={`text-right font-bold ${curR >= 0 ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}`}>
+                      {curR >= 0 ? '+' : ''}{curR.toFixed(2)}R
+                      <div className="text-[9px] text-[var(--text-faint)] font-normal">{Math.floor(aged / 60)}dk {Math.floor(aged % 60)}sn</div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

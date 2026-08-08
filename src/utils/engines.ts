@@ -231,7 +231,7 @@ export class StrategyPerformanceTracker {
       r: hit ? rValue : -1.0,
       t: Date.now()
     });
-    if (this.trades.length > 100) this.trades.shift();
+    if (this.trades.length > 200) this.trades.shift();
   }
 
   getStats() {
@@ -274,11 +274,14 @@ export class StrategyPerformanceTracker {
   getStrategyBonus(strategyId: string): number {
     const stats = this.getStats();
     const s = stats.byStrat[strategyId];
-    if (!s || s.total < 2) return 0;
+    if (!s || s.total < 3) return 0;
     const wr = (s.hits / s.total) * 100;
+    // Ödül/ceza aralığı -10..+10
     if (wr >= 70) return 10;
-    if (wr >= 50) return 5;
-    return 0;
+    if (wr >= 55) return 5;
+    if (wr >= 45) return 0;
+    if (wr >= 30) return -5;
+    return -10;
   }
 }
 
@@ -307,13 +310,15 @@ export class MetaStrategyEngine {
     perfTracker: StrategyPerformanceTracker,
     symbol = 'BTCUSDT',
     multiExchange = true,
-    exchanges: Record<string, any> = {}
+    exchanges: Record<string, any> = {},
+    basePlan?: TradePlan | null
   ): TradePlan | null {
     const now = Date.now();
     const mid = bookData.mid;
     if (!Number.isFinite(mid) || mid <= 0) return null;
 
     const strategies = [
+      basePlan && basePlan.direction !== 'NEUTRAL' ? { ...basePlan } : null,
       this.evalKaplanKapan(activePatterns, now, mid, symbol),
       this.evalKelleAvcisi(activePatterns, now, mid, symbol),
       this.evalBalinaTuzagi(activePatterns, now, mid, symbol),
@@ -326,7 +331,9 @@ export class MetaStrategyEngine {
     for (const res of strategies) {
       if (!res || !res.strategyId) continue;
       const bonus = perfTracker.getStrategyBonus(res.strategyId);
+      const before = res.confidence;
       res.confidence = clamp(res.confidence + bonus, 0, 99);
+      res.confidenceBonus = Math.round(res.confidence - before);
 
       const pools = this.liqSimulator.getPools(mid, 0, symbol);
       const tpPrice = res.tp1 ? res.tp1.price : null;
@@ -616,6 +623,8 @@ export class TradePlanGenerator {
     };
 
     return {
+      strategyId: 'DIRECTIONAL',
+      strategyName: 'Yönlü Mikro-Yapı Planı',
       direction,
       confidence,
       entry,

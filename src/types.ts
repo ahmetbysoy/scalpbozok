@@ -155,6 +155,7 @@ export interface TradePlan {
   riskReward2: number;
   trailingStop: TrailingStopInfo;
   reasoning: string;
+  confidenceBonus?: number;
   webhookPayload?: WebhookPayload;
 }
 

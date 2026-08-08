@@ -165,6 +165,7 @@ interface SignalSlice {
   manipIndex: number;
   rollingAccuracy: RollingAccuracy | null;
   positionStats: PositionStats;
+  openPositions: TrackedPosition[];
 }
 
 interface UISlice {
@@ -256,6 +257,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const POSITION_TIMEOUT_MS = 600000; // 10 dk: ne SL ne TP vurduysa timeout
   const openPositionsRef = useRef<TrackedPosition[]>([]);
   const closedPositionsRef = useRef<ClosedPosition[]>([]);
+  const [openPositions, setOpenPositions] = useState<TrackedPosition[]>([]);
   const [positionStats, setPositionStats] = useState<PositionStats>(() => ({
     total: 0, wins: 0, losses: 0, timeouts: 0,
     winRate: null, avgR: null, expectancy: null,
@@ -336,6 +338,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       openedAt: Date.now()
     });
     openPositionsRef.current = openPositionsRef.current.slice(-40);
+    setOpenPositions([...openPositionsRef.current]);
   }, []);
 
   const resolvePositions = useCallback((midPrice: number) => {
@@ -392,6 +395,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     openPositionsRef.current = keep;
+    setOpenPositions([...keep]);
     if (newlyClosed.length) {
       closedPositionsRef.current = [...closedPositionsRef.current, ...newlyClosed].slice(-200);
       setPositionStats(computePositionStats(closedPositionsRef.current));
@@ -713,7 +717,8 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             perfTrackerRef.current,
             symbolRef.current,
             c.multiExchange,
-            exchangesRef.current
+            exchangesRef.current,
+            basePlan
           );
           const finalPlan = (metaPlan && metaPlan.confidence >= 75) ? metaPlan : basePlan;
           setTradePlan(finalPlan);
@@ -1123,8 +1128,8 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const signalValue = useMemo<SignalSlice>(() => ({
     activePatterns, signalsFeed, tradePlan, narrative, microResult,
-    sigCounts, manipIndex, rollingAccuracy, positionStats
-  }), [activePatterns, signalsFeed, tradePlan, narrative, microResult, sigCounts, manipIndex, rollingAccuracy, positionStats]);
+    sigCounts, manipIndex, rollingAccuracy, positionStats, openPositions
+  }), [activePatterns, signalsFeed, tradePlan, narrative, microResult, sigCounts, manipIndex, rollingAccuracy, positionStats, openPositions]);
 
   const uiValue = useMemo<UISlice>(() => ({
     activeTab, setActiveTab, focusPrice, setFocusPrice, isReplaying
