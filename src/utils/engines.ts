@@ -549,7 +549,7 @@ export class MetaStrategyEngine {
 export class TradePlanGenerator {
   feeRate = 0.0005;
 
-  generatePlan(signals: PatternSignal[], mid: number, heatHistory: any[]): TradePlan {
+  generatePlan(signals: PatternSignal[], mid: number, heatHistory: any[], vpin: number | null = null): TradePlan {
     const bull = signals.filter(s => s.bias === 'bullish' || s.bias === 'bull');
     const bear = signals.filter(s => s.bias === 'bearish' || s.bias === 'bear');
     const bullScore = bull.reduce((s, x) => s + x.confidence, 0) / Math.max(1, bull.length);
@@ -557,26 +557,42 @@ export class TradePlanGenerator {
     const net = bullScore - bearScore;
     const threshold = 40 + Math.min(20, (bull.length + bear.length) * 2);
 
-    if (net > threshold) return this.generateDirectionalPlan('LONG', signals, mid, heatHistory);
-    if (net < -threshold) return this.generateDirectionalPlan('SHORT', signals, mid, heatHistory);
+    if (net > threshold) return this.generateDirectionalPlan('LONG', signals, mid, heatHistory, vpin);
+    if (net < -threshold) return this.generateDirectionalPlan('SHORT', signals, mid, heatHistory, vpin);
     return this.generateNeutralPlan(mid);
   }
 
-  buffer(mid: number, heatHistory: any[]): number {
+  buffer(mid: number, heatHistory: any[], vpin: number | null = null): number {
     let range = 0;
     if (heatHistory && heatHistory.length) {
       const recent = heatHistory.slice(-12).flatMap(s => [s.bids[0]?.[0], s.asks[0]?.[0]]).filter(Boolean);
       if (recent.length > 2) range = Math.max(...recent) - Math.min(...recent);
     }
-    return Math.max(tickSizeFor(mid) * 20, range * 0.06, mid * 0.00025);
+    let buf = Math.max(tickSizeFor(mid) * 20, range * 0.06, mid * 0.00025);
+    // Yüksek VPIN (toksik/bilgili akış) = ani sert hareket riski.
+    // Buffer'ı genişletip erken/gereksiz stop-out'u azaltır (en fazla %50).
+    if (vpin != null && Number.isFinite(vpin)) {
+      const toxicity = clamp(Math.abs(vpin), 0, 100) / 100;
+      buf *= 1 + toxicity * 0.5;
+    }
+    return buf;
   }
 
-  generateDirectionalPlan(direction: 'LONG' | 'SHORT', signals: PatternSignal[], mid: number, heatHistory: any[]): TradePlan {
+  generateDirectionalPlan(direction: 'LONG' | 'SHORT', signals: PatternSignal[], mid: number, heatHistory: any[], vpin: number | null = null): TradePlan {
     const isLong = direction === 'LONG';
-    const buf = this.buffer(mid, heatHistory);
+    const buf = this.buffer(mid, heatHistory, vpin);
     const walls = signals.filter(s => (isLong ? s.type === 'STRONG_BID_WALL' : s.type === 'STRONG_ASK_WALL') && (isLong ? s.price < mid : s.price > mid)).sort((a, b) => isLong ? b.price - a.price : a.price - b.price);
     const targets = signals.filter(s => (isLong ? s.type === 'STRONG_ASK_WALL' : s.type === 'STRONG_BID_WALL') && (isLong ? s.price > mid : s.price < mid)).sort((a, b) => isLong ? a.price - b.price : b.price - a.price);
-    const wall = walls[0];
+
+    // Son 2 dk'da bu fiyat bölgesinde WALL_PULL/SPOOF geçmişi varsa,
+    // aynı bölgede yeniden beliren duvar SL için düşük öncelikli sayılır —
+    // ama hiç duvar kalmasın diye tamamen ekarte edilmez.
+    const now = Date.now();
+    const spoofPrices = signals
+      .filter(s => (s.type === 'WALL_PULL' || s.type === 'SPOOF' || s.type === 'SPOOF TRAP') && now - s.createdAt < 120000)
+      .map(s => s.price);
+    const isSpoofRisky = (price: number) => spoofPrices.some(sp => Math.abs(sp - price) <= buf * 1.5);
+    const wall = walls.find(w => !isSpoofRisky(w.price)) || walls[0];
 
     const entry = wall ? { low: isLong ? (wall.zone ? wall.zone.low : wall.price) : (wall.zone ? wall.zone.low : wall.price - buf * 0.35), high: isLong ? (wall.zone ? wall.zone.high : wall.price + buf * 0.35) : (wall.zone ? wall.zone.high : wall.price), reasoning: `Enter ${isLong ? 'above' : 'below'} ${wall.title} at ${fmtPrice(wall.price)}` } : { low: mid - (isLong ? buf * 0.35 : buf * 0.15), high: mid + (isLong ? buf * 0.15 : buf * 0.35), reasoning: 'Enter near current mid price' };
     const stopLoss = wall ? { price: isLong ? Math.min(wall.invalidation || wall.price - buf, wall.price - buf) : Math.max(wall.invalidation || wall.price + buf, wall.price + buf), reasoning: `${isLong ? 'Below' : 'Above'} ${isLong ? 'support' : 'resistance'} wall at ${fmtPrice(wall.price)}` } : { price: isLong ? mid - buf * 1.2 : mid + buf * 1.2, reasoning: 'Conservative stop' };

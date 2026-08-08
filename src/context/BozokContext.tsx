@@ -704,7 +704,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
           setNarrative(narrativeEngineRef.current.synthesize(detected));
 
-          const basePlan = tradePlanGenRef.current.generatePlan(detected, mid, nextHeat);
+          const basePlan = tradePlanGenRef.current.generatePlan(detected, mid, nextHeat, vpinRef.current);
           const metaPlan = metaStrategyRef.current.evaluate(
             detected,
             { mid, bidRows: bids, askRows: asks },
