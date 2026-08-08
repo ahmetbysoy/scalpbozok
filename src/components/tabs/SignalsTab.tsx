@@ -12,6 +12,7 @@ export const SignalsTab: React.FC = () => {
     sigCounts,
     manipIndex,
     rollingAccuracy,
+    positionStats,
     exportCSV,
     setFocusPrice,
     setActiveTab
@@ -86,6 +87,14 @@ export const SignalsTab: React.FC = () => {
             {rollingAccuracy?.dir != null ? `%${rollingAccuracy.dir}` : '—'}
           </div>
           <div className="l text-[9px] text-[var(--text-faint)] uppercase">doğruluk</div>
+        </div>
+        <div className="chip flex-1 bg-[var(--panel)] border border-[var(--border)] rounded-lg p-1.5 text-center min-w-[82px]">
+          <div className="n mono font-bold text-sm text-[var(--accent)]">
+            {positionStats.total
+              ? `${positionStats.winRatePct ?? 0}% (${positionStats.total})`
+              : '—'}
+          </div>
+          <div className="l text-[9px] text-[var(--text-faint)] uppercase">plan isabet</div>
         </div>
         <div className="chip flex-1 bg-[var(--panel)] border border-[var(--border)] rounded-lg p-1.5 text-center min-w-[70px]">
           <div className={`n mono font-bold text-sm ${manipIndex < 35 ? 'text-[var(--bull)]' : 'text-[var(--bear)]'}`}>
