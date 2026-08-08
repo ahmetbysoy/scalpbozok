@@ -40,6 +40,13 @@ export const BookTab: React.FC = () => {
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number; price: number; timeAgoSec: number; qtyAtPrice: number } | null>(null);
   const [pinnedAlerts, setPinnedAlerts] = useState<PinnedAlert[]>([]);
 
+  // Parmakla yakınlaştırma (pinch-to-zoom). 1 = otomatik sığdırma.
+  // Çift dokunuşla otomatik moda geri döner.
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const pinchRef = useRef<{ startDist: number; startZoom: number } | null>(null);
+  const lastTapRef = useRef(0);
+  const touchMovedRef = useRef(false);
+
   const rawLayers = config.activeLayers;
   const activeLayers = useMemo(() => {
     if (rawLayers instanceof Set) return rawLayers;
@@ -128,7 +135,7 @@ export const BookTab: React.FC = () => {
     const tick = tickSizeFor(mid);
     const visiblePrices = [...book.bids.slice(0, 25), ...book.asks.slice(0, 25)].map(l => l.price).filter(Number.isFinite);
     const maxDist = Math.max(tick * 24, ...visiblePrices.map(p => Math.abs(p - mid)));
-    const priceRange = clamp(maxDist * 1.65, tick * 24, tick * 260);
+    const priceRange = clamp((maxDist * 1.65) / zoomLevel, tick * 24, tick * 260);
     const priceTop = mid + priceRange;
     const priceBot = mid - priceRange;
 
@@ -206,12 +213,20 @@ export const BookTab: React.FC = () => {
       if (snap.maxQty && snap.maxQty > maxQty) maxQty = snap.maxQty;
     }
 
-    // Fiyat ekseni: ince grid çizgileri + sağda (COB solunda) fiyat etiketleri.
-    // 7 dilim, ana çizim alanına sığacak şekilde.
-    const axisSteps = 7;
+    // Fiyat ekseni: keyfi 7 dilim yerine 1/2/5×10ⁿ mantığıyla "yuvarlak"
+    // fiyat adımlarına oturan grid çizgileri (okunabilirlik için).
+    const niceGridStep = (rawStep: number): number => {
+      if (!Number.isFinite(rawStep) || rawStep <= 0) return tick;
+      const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+      const norm = rawStep / magnitude;
+      const niceNorm = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+      const step = niceNorm * magnitude;
+      return Math.max(tick, Math.round(step / tick) * tick);
+    };
+    const gridStep = niceGridStep((priceRange * 2) / 7);
     const gridPrices: number[] = [];
-    for (let i = 1; i < axisSteps; i++) {
-      gridPrices.push(priceBot + (priceRange * 2 * i) / axisSteps);
+    for (let gp = Math.ceil(priceBot / gridStep) * gridStep; gp < priceTop; gp += gridStep) {
+      gridPrices.push(gp);
     }
     ctx.lineWidth = 1;
     gridPrices.forEach(gp => {
@@ -572,7 +587,7 @@ export const BookTab: React.FC = () => {
     ctx.fillText('-30s', mainCanvasW / 2, h - 6);
     ctx.fillText('-60s', 12, h - 6);
 
-  }, [heatHistory, lastPrice, book, trades, activePatterns, tradePlan, config, focusPrice, activeLayers, planHitboxes, patternHitboxes, vpvrData, hoverPos, pinnedAlerts]);
+  }, [heatHistory, lastPrice, book, trades, activePatterns, tradePlan, config, focusPrice, activeLayers, planHitboxes, patternHitboxes, vpvrData, hoverPos, pinnedAlerts, zoomLevel]);
 
   // Handle Drag-to-Trade Mouse Down
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -598,7 +613,7 @@ export const BookTab: React.FC = () => {
     const tick = tickSizeFor(mid);
     const visiblePrices = [...book.bids.slice(0, 25), ...book.asks.slice(0, 25)].map(l => l.price).filter(Number.isFinite);
     const maxDist = Math.max(tick * 24, ...visiblePrices.map(p => Math.abs(p - mid)));
-    const priceRange = clamp(maxDist * 1.65, tick * 24, tick * 260);
+    const priceRange = clamp((maxDist * 1.65) / zoomLevel, tick * 24, tick * 260);
     const priceTop = mid + priceRange;
     const priceBot = mid - priceRange;
 
@@ -637,9 +652,46 @@ export const BookTab: React.FC = () => {
     setDraggingLine(null);
   };
 
+  // Parmakla yakınlaştırma (2 parmak) + çift dokunuşla otomatik moda dönüş (1 parmak)
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    touchMovedRef.current = false;
+    if (e.touches.length === 2) {
+      const [t1, t2] = [e.touches[0], e.touches[1]];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      pinchRef.current = { startDist: dist, startZoom: zoomLevel };
+    } else if (e.touches.length === 1) {
+      const now = Date.now();
+      if (now - lastTapRef.current < 280) {
+        setZoomLevel(1); // çift dokunuş: otomatik sığdırmaya dön
+        pinchRef.current = null;
+      }
+      lastTapRef.current = now;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 2 && pinchRef.current) {
+      e.preventDefault();
+      touchMovedRef.current = true;
+      const [t1, t2] = [e.touches[0], e.touches[1]];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const scale = dist / pinchRef.current.startDist;
+      setZoomLevel(clamp(pinchRef.current.startZoom * scale, 0.4, 3));
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length < 2) pinchRef.current = null;
+  };
+
   // Canvas Click for Focus Pattern or Alarm Pinning
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (draggingLine) return;
+    // Pinch hareketinden sonra sentetik click'in alarm kurmasını engelle.
+    if (touchMovedRef.current) {
+      touchMovedRef.current = false;
+      return;
+    }
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -770,6 +822,9 @@ export const BookTab: React.FC = () => {
           onMouseLeave={handleMouseLeave}
           onMouseUp={handleMouseUp}
           onClick={handleCanvasClick}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
         />
 
         {/* Floating Crosshair Microstructure Inspector HUD Box */}
@@ -807,8 +862,17 @@ export const BookTab: React.FC = () => {
           <span className="bg-[#05070c]/80 border border-emerald-500/30 px-2 py-0.5 rounded font-bold text-[var(--bull)]">VERİ AKIŞI AKTİF</span>
         </div>
 
-        {/* Fullscreen Button */}
+        {/* Fullscreen + Zoom Reset Buttons */}
         <div className="chartToolbar absolute top-2 right-2 z-20 flex gap-1.5 pointer-events-auto">
+          {Math.abs(zoomLevel - 1) > 0.05 && (
+            <button
+              onClick={() => setZoomLevel(1)}
+              className="chartToolBtn h-8 px-2.5 rounded-lg bg-[#05070c]/80 border border-[var(--accent)]/50 text-[var(--accent)] flex items-center justify-center text-[10px] font-bold backdrop-blur"
+              aria-label="Otomatik yakınlaştırmaya dön"
+            >
+              {zoomLevel.toFixed(1)}× · AUTO
+            </button>
+          )}
           <button
             onClick={() => setIsFullscreen(!isFullscreen)}
             className="chartToolBtn w-8 h-8 rounded-lg bg-[#05070c]/80 border border-white/10 text-gray-300 flex items-center justify-center text-sm backdrop-blur hover:text-[var(--accent)] hover:border-[var(--accent)] transition-all"
