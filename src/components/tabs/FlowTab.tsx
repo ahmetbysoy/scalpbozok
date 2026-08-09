@@ -16,8 +16,9 @@ export const FlowTab: React.FC = () => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const w = canvas.parentElement ? canvas.parentElement.clientWidth : window.innerWidth;
-    const h = canvas.parentElement ? canvas.parentElement.clientHeight : 300;
+    const parent = canvas.parentElement;
+    const w = parent ? parent.clientWidth : window.innerWidth;
+    const h = parent ? parent.clientHeight : 300;
     const dpr = window.devicePixelRatio || 1;
 
     canvas.width = w * dpr;
@@ -32,37 +33,57 @@ export const FlowTab: React.FC = () => {
     const shown = flowCandles.slice(-60);
     if (!shown.length) return;
 
-    const area = { x: 30, y: 20, w: w - 40, h: h - 50 };
+    const area = { x: 44, y: 20, w: w - 54, h: h - 50 };
     const cw = area.w / Math.max(30, shown.length);
     const bw = Math.max(3, cw * 0.6);
 
-    // Y Axis Lines
+    // FlowCandleBuilder OHLC alanlarına gerçek fiyatı (mid) yazar.
+    // Eski kod bunları -100..+100 basınç değeri gibi çiziyordu; bu yüzden
+    // mumlar ekran dışına çıkıyordu. Gerçek fiyat aralığına göre ölçekle.
+    const highs = shown.map(c => c.high);
+    const lows = shown.map(c => c.low);
+    let maxP = Math.max(...highs);
+    let minP = Math.min(...lows);
+    if (!Number.isFinite(maxP) || !Number.isFinite(minP) || maxP <= minP) {
+      maxP = (lastPrice || 0) + 1;
+      minP = (lastPrice || 0) - 1;
+    }
+    const pad = (maxP - minP) * 0.08 || 1;
+    maxP += pad;
+    minP = Math.max(0, minP - pad);
+    const pRange = maxP - minP || 1;
+
+    const priceToY = (p: number) => area.y + area.h - ((p - minP) / pRange) * area.h;
+
+    // Y axis — fiyat seviyeleri
     ctx.strokeStyle = 'rgba(148,163,184,.12)';
     ctx.fillStyle = 'rgba(234,243,255,.45)';
     ctx.font = '9px Inter, sans-serif';
     ctx.textAlign = 'right';
-
-    [-100, -50, 0, 50, 100].forEach(v => {
-      const y = area.y + area.h - (((v + 100) / 200) * area.h);
+    const yTicks = 5;
+    for (let i = 0; i <= yTicks; i++) {
+      const p = minP + (pRange * i) / yTicks;
+      const y = priceToY(p);
       ctx.beginPath();
       ctx.moveTo(area.x, y);
       ctx.lineTo(area.x + area.w, y);
       ctx.stroke();
-      ctx.fillText(v > 0 ? '+' + v : v.toString(), area.x - 4, y + 3);
-    });
+      ctx.fillText(fmtPrice(p), area.x - 5, y + 3);
+    }
 
-    // Draw Candles
+    // Candles
     shown.forEach((c, i) => {
       const x = area.x + i * cw + cw / 2;
-      const yh = area.y + area.h - (((c.high + 100) / 200) * area.h);
-      const yl = area.y + area.h - (((c.low + 100) / 200) * area.h);
-      const yo = area.y + area.h - (((c.open + 100) / 200) * area.h);
-      const yc = area.y + area.h - (((c.close + 100) / 200) * area.h);
+      const yh = priceToY(c.high);
+      const yl = priceToY(c.low);
+      const yo = priceToY(c.open);
+      const yc = priceToY(c.close);
 
       const isBull = c.close >= c.open;
       const bodyColor = isBull ? canvasPalette.flowBull : canvasPalette.flowBear;
       const wickColor = isBull ? canvasPalette.flowBullWick : canvasPalette.flowBearWick;
 
+      // Wick
       ctx.strokeStyle = wickColor;
       ctx.lineWidth = 1.2;
       ctx.beginPath();
@@ -70,29 +91,31 @@ export const FlowTab: React.FC = () => {
       ctx.lineTo(x, yl);
       ctx.stroke();
 
+      // Body
       const top = Math.min(yo, yc);
       const bh = Math.max(2, Math.abs(yc - yo));
       ctx.fillStyle = bodyColor;
       ctx.fillRect(x - bw / 2, top, bw, bh);
 
-      // POC indicator
-      if (c.poc !== undefined) {
-        const pocY = area.y + area.h - (((c.poc + 100) / 200) * area.h);
-        ctx.strokeStyle = '#ffd166';
-        ctx.lineWidth = 2.0;
-        ctx.beginPath();
-        ctx.moveTo(x - bw / 2 - 2, pocY);
-        ctx.lineTo(x + bw / 2 + 2, pocY);
-        ctx.stroke();
+      // Hacim/akış yoğunluğunu gövdede belirt: aktivite yüksekse
+      // kenarlığı hafifçe parlak çiz.
+      if (c.activity > 0 && c.strength > 60) {
+        ctx.strokeStyle = isBull ? 'rgba(255,255,255,.18)' : 'rgba(255,255,255,.18)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - bw / 2, top, bw, bh);
       }
     });
-
-  }, [flowCandles]);
+  }, [flowCandles, lastPrice]);
 
   const lastCandle = flowCandles[flowCandles.length - 1];
-  const pressureVal = lastCandle ? Math.round(lastCandle.close) : 0;
+
+  // signed basınç: alış-satış aktivitesinin oranı (-100..+100)
+  const pressureVal = lastCandle && lastCandle.activity > 0
+    ? Math.round(((lastCandle.buyActivity - lastCandle.sellActivity) / lastCandle.activity) * 100)
+    : 0;
   const isBull = pressureVal > 15;
   const isBear = pressureVal < -15;
+  const last60sLiq = liquidations.filter(l => Date.now() - l.timestamp < 60000).length;
 
   return (
     <div className="view active flex flex-col h-full bg-[#03060d] overflow-hidden" id="flowView">
@@ -103,20 +126,20 @@ export const FlowTab: React.FC = () => {
               {isBull ? 'ALIM BASKISI HAKİM' : isBear ? 'SATIŞ BASKISI HAKİM' : 'NÖTR / DENGELİ AKIŞ'}
             </div>
             <div className="flowConfidence mono text-xs font-bold text-[var(--accent)]">
-              {lastCandle ? `%${Math.round(lastCandle.strength * 100)} GÜÇ` : '—'}
+              {lastCandle ? `%${Math.round(lastCandle.strength)} KESİNLİK` : '—'}
             </div>
           </div>
           <div className="flowDetails text-xs flex flex-col gap-1 mb-2">
             <div className="flowLiquidation font-bold text-[var(--text)]">
-              Son 60sn Tasfiyeler: {liquidations.length} Adet Canlı Patlama
+              Son 60sn Tasfiyeler: {last60sLiq} Adet
             </div>
             <div className="flowBreakdown text-[10px] text-[var(--text-faint)] mono border-t border-white/10 pt-1.5 mt-1">
-              Anlık Akış Basıncı: {pressureVal >= 0 ? '+' : ''}{pressureVal} · Mod: {config.flowCandleMode.toUpperCase()}
+              İmzalı Akış Basıncı: {pressureVal >= 0 ? '+' : ''}{pressureVal} · Pencere: {config.flowTimeframeMs / 1000}s
             </div>
           </div>
           <div className="flowAction flex items-center justify-between gap-2 border-t border-white/10 pt-2">
             <div className="flowActionText text-[11px] text-[var(--text-dim)]">
-              {isBull ? "Book sekmesinde üst direnç duvarlarını ve likidite boşluklarını takip et." : "Book sekmesinde alt alıcı desteklerini ve emilimleri incele."}
+              {isBull ? "Book sekmesinde üst direnç duvarlarını ve likidite boşluklarını takip et." : isBear ? "Book sekmesinde alt alıcı desteklerini ve emilimleri incele." : "Akış kararsız, daha net sinyal bekleniyor."}
             </div>
             <button
               onClick={() => setActiveTab('bookView')}
@@ -149,7 +172,7 @@ export const FlowTab: React.FC = () => {
             <div className="legendItems grid grid-cols-3 gap-1.5 text-[10px] text-[var(--text-dim)]">
               <div className="legendItem flex items-center gap-1.5">
                 <span className="w-2 h-3 rounded-sm bg-[var(--bull)] shrink-0"></span>
-                <span>Alım baskısı</span>
+                <span>Alış baskısı</span>
               </div>
               <div className="legendItem flex items-center gap-1.5">
                 <span className="w-2 h-3 rounded-sm bg-[var(--bear)] shrink-0"></span>
@@ -168,8 +191,8 @@ export const FlowTab: React.FC = () => {
                 <span>Long tasfiye</span>
               </div>
               <div className="legendItem flex items-center gap-1.5">
-                <span className="text-[#ffd166] font-bold">—</span>
-                <span>POC Seviyesi</span>
+                <span className="text-[var(--text-faint)] font-bold">━</span>
+                <span>Fiyat mum (OHLC)</span>
               </div>
             </div>
           )}
