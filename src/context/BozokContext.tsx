@@ -41,7 +41,7 @@ import {
   ClosedPosition,
   PositionStats
 } from '../types';
-import { setSymbolPrecision } from '../utils/fmt';
+import { setSymbolPrecision, clamp } from '../utils/fmt';
 import { applyThemeStyle } from '../utils/theme';
 import {
   PatternEngineV2,
@@ -56,7 +56,8 @@ import {
   VPINCalculator,
   LiquidationPressureCalculator,
   FlowCandleBuilder,
-  CVDDivergenceDetector
+  CVDDivergenceDetector,
+  createPatternSignal
 } from '../utils/detectors';
 
 /* ------------------------------------------------------------------ */
@@ -826,6 +827,46 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setLiquidations(prev => {
           const next = [...newLiqs, ...prev].slice(0, 500);
           liquidationsRef.current = next;
+
+          // Liquidation cluster/cascade pipeline: only emit a pattern when a
+          // meaningful cluster/cascade is detected (not every individual liq).
+          const cluster = liqCalcRef.current.detectCluster(next);
+          const cascade = liqCalcRef.current.detectCascade(next);
+          if (cluster) {
+            const isLongCluster = cluster.type === 'LONG_CLUSTER';
+            const sig = createPatternSignal({
+              type: isLongCluster ? 'LONG_LIQUIDATION_CLUSTER' : 'SHORT_LIQUIDATION_CLUSTER',
+              title: isLongCluster ? "Long'lar Patliyor" : "Short'lar Patliyor",
+              bias: isLongCluster ? 'bearish' : 'bullish',
+              price: cluster.avgPrice,
+              confidence: clamp(65 + Math.min(20, cluster.count * 2), 65, 90),
+              severity: 'high',
+              timeframe: '1-5dk',
+              explanation: `${cluster.count} adet ${isLongCluster ? 'long' : 'short'} tasfiye, ${(cluster.notional / 1000).toFixed(0)}k kümelendi.`,
+              metadata: { cluster }
+            });
+            (sig as any)._emitted = true;
+            setActivePatterns(prev2 => [...prev2, sig]);
+            setSignalsFeed(prev2 => [sig, ...prev2].slice(0, 200));
+          }
+          if (cascade) {
+            const isLongCascade = cascade.side === 'long';
+            const sig = createPatternSignal({
+              type: 'LIQUIDATION_CASCADE',
+              title: 'Tasfiye Dalgasi',
+              bias: isLongCascade ? 'bearish' : 'bullish',
+              price: (cascade.priceRange.min + cascade.priceRange.max) / 2,
+              confidence: clamp(75 + Math.min(15, cascade.count), 75, 95),
+              severity: 'critical',
+              timeframe: '1-5dk',
+              explanation: `${cascade.count} tasfiye art arda, toplam ${(cascade.notional / 1000).toFixed(0)}k. Sert hareket devam edebilir.`,
+              metadata: { cascade }
+            });
+            (sig as any)._emitted = true;
+            setActivePatterns(prev2 => [...prev2, sig]);
+            setSignalsFeed(prev2 => [sig, ...prev2].slice(0, 200));
+          }
+
           return next;
         });
       }
