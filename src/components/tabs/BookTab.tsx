@@ -4,7 +4,7 @@ import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import { useBozok } from '../../context/BozokContext';
 import { fmtPrice, fmtQty, tickSizeFor, clamp } from '../../utils/fmt';
 import { canvasPalette } from '../../utils/theme';
-import { signalUX } from '../../utils/detectors';
+import { signalUX, LiquidationPoolSimulator } from '../../utils/detectors';
 import { HeatmapLayerKey, PatternSignal, BookLevel } from '../../types';
 
 interface PinnedAlert {
@@ -29,7 +29,9 @@ export const BookTab: React.FC = () => {
     focusPrice,
     setActiveTab,
     planHitboxes,
-    patternHitboxes
+    patternHitboxes,
+    cvd,
+    symbol
   } = useBozok();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -107,6 +109,12 @@ export const BookTab: React.FC = () => {
 
     return { profile, maxVol: Math.max(1, maxVol), pocPrice, vah, val };
   }, [trades, lastPrice]);
+
+  const liqPools = useMemo(() => {
+    if (!lastPrice) return [];
+    const simulator = new LiquidationPoolSimulator();
+    return simulator.getPools(lastPrice, cvd || 0, symbol || 'BTCUSDT');
+  }, [lastPrice, cvd, symbol]);
 
   // Main Heatmap Canvas Drawing
   useEffect(() => {
@@ -424,6 +432,39 @@ export const BookTab: React.FC = () => {
         const pocLabelY = Math.max(18, pocY);
         drawPill(vpvrX + 4, pocLabelY, `POC ${fmtPrice(vpvrData.pocPrice)}`, '#f59e0b', '800 9px monospace', 'left');
       }
+    }
+
+    // 5b. Draw leverage liquidation pool estimates
+    if (activeLayers.has('liqpools')) {
+      liqPools.forEach(pool => {
+        if (Math.abs(pool.price - mid) > priceRange * 1.2) return;
+        const y = priceToY(pool.price);
+        if (y < 0 || y > plotBottom) return;
+
+        const isLong = pool.side === 'long';
+        ctx.save();
+        ctx.strokeStyle = isLong ? 'rgba(239,68,68,0.75)' : 'rgba(31,214,122,0.75)';
+        ctx.fillStyle = isLong ? 'rgba(239,68,68,0.14)' : 'rgba(31,214,122,0.14)';
+        ctx.setLineDash([3, 4]);
+        ctx.lineWidth = 1;
+
+        ctx.fillRect(0, y - 6, mainCanvasW, 12);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(mainCanvasW, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        drawPill(
+          mainCanvasW - 8,
+          y + 5,
+          `💧 ${pool.leverage}x ${isLong ? 'LONG LIQ' : 'SHORT LIQ'} ${pool.estNotionalFormatted || ''}`,
+          isLong ? '#ef4444' : '#1fd67a',
+          '700 8px monospace',
+          'right'
+        );
+        ctx.restore();
+      });
     }
 
     // 6. Draw Current Orderbook Right Column
