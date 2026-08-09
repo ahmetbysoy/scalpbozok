@@ -154,6 +154,40 @@ export const SettingsTab: React.FC = () => {
           </div>
 
           <div className="setRow flex justify-between items-center text-xs">
+            <div className="flex flex-col max-w-[60%]">
+              <span className="text-[var(--text)]">Otomatik Pozisyon Takibi</span>
+              <span className="text-[9px] text-[var(--text-faint)] leading-tight">Açık planları PERF için otomatik kaydet</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={config.autoTrackPositions}
+              onChange={(e) => updateConfig({ autoTrackPositions: e.target.checked })}
+              className="w-4 h-4 accent-[var(--accent)]"
+            />
+          </div>
+
+          {config.autoTrackPositions && (
+            <div className="setRow flex justify-between items-center text-xs">
+              <div className="flex flex-col max-w-[60%]">
+                <span className="text-[var(--text)]">Minimum Plan Güveni</span>
+                <span className="text-[9px] text-[var(--text-faint)] leading-tight">Altındaki planlar kaydedilmez</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  step="5"
+                  min="0"
+                  max="99"
+                  value={config.minPositionConfidence}
+                  onChange={(e) => updateConfig({ minPositionConfidence: Math.max(0, Math.min(99, parseInt(e.target.value, 10) || 0)) })}
+                  className="setInput bg-[var(--panel2)] border border-[var(--border)] text-xs text-[var(--text)] rounded px-2 py-1 w-16 text-right mono font-bold"
+                />
+                <span className="text-[var(--text-dim)] text-xs">%</span>
+              </div>
+            </div>
+          )}
+
+          <div className="setRow flex justify-between items-center text-xs">
             <span className="text-[var(--text)]">Maksimum Kaldıraç</span>
             <input
               type="number"

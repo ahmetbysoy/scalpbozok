@@ -108,6 +108,8 @@ const DEFAULT_CONFIG: AppConfig = {
   microBalance: 5.0,
   microRiskPct: 0.20,
   microMaxLeverage: 20,
+  autoTrackPositions: true,
+  minPositionConfidence: 70,
   activeLayers: new Set<HeatmapLayerKey>(DEFAULT_LAYERS)
 };
 
@@ -770,18 +772,22 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const finalPlan = (metaPlan && metaPlan.confidence >= 75) ? metaPlan : basePlan;
           setTradePlan(finalPlan);
 
-          // Yeni bir plan geldiğinde, kimlik değiştiyse pozisyon aç.
+          // Yeni bir plan geldiğinde, kullanıcı otomatik takibe izin verdiyse
+          // ve güven eşiğinin üstündeyse pozisyon aç.
           if (finalPlan && finalPlan.direction !== 'NEUTRAL' && finalPlan.entry && finalPlan.stopLoss) {
-            const planKey = [
-              finalPlan.strategyId || 'DIR',
-              finalPlan.direction,
-              Math.round((finalPlan.entry.low + finalPlan.entry.high) / 2),
-              Math.round(finalPlan.stopLoss.price),
-              Math.round(finalPlan.confidence / 5)
-            ].join(':');
-            if (planKey !== lastPlanKeyRef.current) {
-              lastPlanKeyRef.current = planKey;
-              openPositionForPlan(finalPlan);
+            const cfg = configRef.current;
+            if (cfg.autoTrackPositions && finalPlan.confidence >= cfg.minPositionConfidence) {
+              const planKey = [
+                finalPlan.strategyId || 'DIR',
+                finalPlan.direction,
+                Math.round((finalPlan.entry.low + finalPlan.entry.high) / 2),
+                Math.round(finalPlan.stopLoss.price),
+                Math.round(finalPlan.confidence / 5)
+              ].join(':');
+              if (planKey !== lastPlanKeyRef.current) {
+                lastPlanKeyRef.current = planKey;
+                openPositionForPlan(finalPlan);
+              }
             }
           } else {
             lastPlanKeyRef.current = '';

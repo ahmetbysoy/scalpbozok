@@ -356,5 +356,7 @@ export interface AppConfig {
   microBalance: number;
   microRiskPct: number;
   microMaxLeverage: number;
+  autoTrackPositions: boolean;
+  minPositionConfidence: number;
   activeLayers: Set<HeatmapLayerKey>;
 }
