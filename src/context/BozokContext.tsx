@@ -805,6 +805,58 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     let explicitlyClosed = false;
     let visHandler: (() => void) | null = null;
 
+    // Order book stale/gap koruması (Binance Futures diff depth):
+    // U/u son güncelleme id'lerini takip eder. Bağlantıda snapshot çekilene
+    // kadar book uygulanmaz; sequence atlarsa buffer temizlenip yeniden
+    // snapshot alınır.
+    let depthInSync = false;
+    let lastFinalUpdateId = 0;
+    let snapshotInFlight = false;
+
+    const resetBookSync = () => {
+      depthInSync = false;
+      lastFinalUpdateId = 0;
+      pendingDepthRef.current = null;
+    };
+
+    const ensureDepthSnapshot = async () => {
+      if (snapshotInFlight || depthInSync || isCancelled) return;
+      snapshotInFlight = true;
+      try {
+        const res = await fetch(`https://fapi.binance.com/fapi/v1/depth?symbol=${symbol.toUpperCase()}&limit=20`);
+        const snap = await res.json();
+        if (isCancelled) return;
+
+        // Snapshot'ı geçici olarak uygula (gerçek doğrulama bir sonraki diff
+        // event'inde U/u kontrolü ile yapılır).
+        const bids = (snap.bids || [])
+          .map(([p, q]: [string, string]) => {
+            const price = parseFloat(p), qty = parseFloat(q);
+            return { price, qty, notional: price * qty } as BookLevel;
+          })
+          .filter((b: BookLevel) => b.qty > 0)
+          .sort((a: BookLevel, b: BookLevel) => b.price - a.price);
+        const asks = (snap.asks || [])
+          .map(([p, q]: [string, string]) => {
+            const price = parseFloat(p), qty = parseFloat(q);
+            return { price, qty, notional: price * qty } as BookLevel;
+          })
+          .filter((a: BookLevel) => a.qty > 0)
+          .sort((a: BookLevel, b: BookLevel) => a.price - b.price);
+
+        if (bids.length && asks.length) {
+          lastFinalUpdateId = Number(snap.lastUpdateId) || 0;
+          depthInSync = true;
+          pendingDepthRef.current = { bids, asks, ts: Date.now() };
+          scheduleFlush();
+        }
+      } catch {
+        // snapshot alınamazsa bir sonraki event yeniden dener.
+      } finally {
+        snapshotInFlight = false;
+      }
+    };
+
     const markBinance = (status: ExchangeState['status'], err?: string | null) => {
       setConnStatus(status);
       setExchanges(prev => ({
@@ -844,6 +896,31 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const stream: string = msg.stream || '';
 
       if (stream.includes('@depth')) {
+        const U = Number(data.U);
+        const u = Number(data.u);
+        const pu = Number(data.pu);
+
+        // Bağlantı başında / gap sonrası snapshot yoksa event'i atla,
+        // snapshot almayı tetikle.
+        if (!depthInSync || lastFinalUpdateId === 0) {
+          ensureDepthSnapshot();
+          return;
+        }
+
+        // Snapshot'tan eski event geldiyse yoksay.
+        if (u <= lastFinalUpdateId) return;
+
+        // Sequence gap: bu event snapshot'ın devamı değil; bozuk book
+        // üretmemek için sync'i sıfırla ve yeniden snapshot iste.
+        if (pu > lastFinalUpdateId) {
+          resetBookSync();
+          ensureDepthSnapshot();
+          markBinance('connecting', 'Binance depth sequence gap — resyncing');
+          return;
+        }
+
+        lastFinalUpdateId = u;
+
         const rawBids = data.b || data.bids || [];
         const rawAsks = data.a || data.asks || [];
 
