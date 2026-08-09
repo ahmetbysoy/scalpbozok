@@ -194,7 +194,7 @@ export const LevelsTab: React.FC = () => {
           <div className="planRow flex justify-between items-center py-1.5 border-b border-[var(--border-soft)] text-xs">
             <span className="text-[var(--text-dim)]">Bütçe / Risk</span>
             <span className="v mono font-bold text-[var(--text)]">
-              ${microResult ? microResult.balance.toFixed(2) : '5.00'} (${microResult ? microResult.riskAmount : '1.00'} Risk @ %{microResult ? microResult.riskPct : '20'} Kelly)
+              ${microResult ? microResult.balance.toFixed(2) : '5.00'} (${microResult ? microResult.riskAmount : '1.00'} Risk @ %${microResult ? microResult.riskPct : '20'})
             </span>
           </div>
 

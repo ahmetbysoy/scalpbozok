@@ -132,16 +132,25 @@ export const SettingsTab: React.FC = () => {
           </div>
 
           <div className="setRow flex justify-between items-center text-xs">
-            <span className="text-[var(--text)]">İşlem Başı Risk Limiti (% Kelly)</span>
-            <input
-              type="number"
-              step="0.05"
-              min="0.05"
-              max="0.50"
-              value={config.microRiskPct}
-              onChange={(e) => updateConfig({ microRiskPct: parseFloat(e.target.value) || 0.20 })}
-              className="setInput bg-[var(--panel2)] border border-[var(--border)] text-xs text-[var(--text)] rounded px-2 py-1 w-20 text-right mono font-bold"
-            />
+            <div className="flex flex-col">
+              <span className="text-[var(--text)]">İşlem Başı Risk Limiti</span>
+              <span className="text-[9px] text-[var(--text-faint)] leading-tight">Kelly bu değeri tavan olarak kullanır (maks. risk)</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                step="1"
+                min="1"
+                max="50"
+                value={Math.round((config.microRiskPct || 0.20) * 100)}
+                onChange={(e) => {
+                  const pct = parseInt(e.target.value, 10);
+                  updateConfig({ microRiskPct: Number.isFinite(pct) ? Math.max(0.01, Math.min(0.50, pct / 100)) : 0.20 });
+                }}
+                className="setInput bg-[var(--panel2)] border border-[var(--border)] text-xs text-[var(--text)] rounded px-2 py-1 w-16 text-right mono font-bold"
+              />
+              <span className="text-[var(--text-dim)] text-xs">%</span>
+            </div>
           </div>
 
           <div className="setRow flex justify-between items-center text-xs">

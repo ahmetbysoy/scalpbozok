@@ -718,9 +718,13 @@ export class MicroAccountOptimizer {
   }
 
   kellyRiskPct(confidence: number, baseRiskPct = 0.20): number {
-    if (!Number.isFinite(confidence) || confidence <= 0) return baseRiskPct;
-    const k = 0.005 + (confidence / 100) * 0.045;
-    return clamp(k, 0.005, 0.05);
+    if (!Number.isFinite(confidence) || confidence <= 0) return 0;
+    // Kullanıcının 'işlem başı risk limiti' tavan olarak kullanılır.
+    // Kelly katsayısı 0.05 (düşük güven) ile baseRiskPct (tam güven)
+    // arasında orantılıdır; eskiden sabit %5 ile sınırlıydı.
+    const floor = Math.min(0.005, baseRiskPct);
+    const k = floor + (confidence / 100) * (baseRiskPct - floor);
+    return clamp(k, floor, baseRiskPct);
   }
 
   calculate(
