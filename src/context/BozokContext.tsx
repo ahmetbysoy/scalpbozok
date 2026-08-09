@@ -498,6 +498,7 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const setSymbol = useCallback((sym: string) => {
     const s = sym.toUpperCase();
+    if (s === symbolRef.current) return;
     setSymbolState(s);
     updateConfig({ symbol: s });
   }, [updateConfig]);
@@ -510,6 +511,50 @@ export const BozokProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }, durationMs);
     }
   }, []);
+
+  // Sembol değiştiğinde eski sembolün canlı state/ref tamponlarını temizle.
+  // Aksi halde BTC trades/sinyalleri ETH book'u üzerinde kalıp yanlış
+  // pattern ve plan üretiyordu.
+  useEffect(() => {
+    setLastPrice(null);
+    setPrevPrice(null);
+    setBook({ bids: [], asks: [], ts: 0 });
+    setTrades([]);
+    setCvd(0);
+    setCvdHistory([]);
+    setLargeCvdHistory([]);
+    setSmallCvdHistory([]);
+    setVpinValue(null);
+    setHeatHistory([]);
+    setLiquidations([]);
+    setFlowCandles([]);
+    setActivePatterns([]);
+    setSignalsFeed([]);
+    setTradePlan(null);
+    setMicroResult(null);
+    setSigCounts({ bull: 0, bear: 0, warn: 0 });
+    setRollingAccuracy(null);
+    setNarrative({ icon: '🌐', title: 'NÖTR / BEKLE', bias: 'neu', text: 'Veri bekleniyor...' });
+
+    pendingDepthRef.current = null;
+    pendingTradesRef.current = [];
+    pendingTickerRef.current = null;
+    pendingLiquidationsRef.current = [];
+    pendingVerifyRef.current = [];
+    openPositionsRef.current = [];
+    setOpenPositions([]);
+    setPositionStats({
+      total: 0, wins: 0, losses: 0, timeouts: 0,
+      winRate: null, avgR: null, expectancy: null,
+      byStrategy: {}
+    });
+
+    // Engine içindeki aktif sinyal/duvar geçmişini de sıfırla.
+    patternEngineRef.current.reset();
+    perfTrackerRef.current.trades = [];
+    vpinCalcRef.current = new VPINCalculator();
+    flowBuilderRef.current = new FlowCandleBuilder(configRef.current.flowTimeframeMs);
+  }, [symbol]);
 
   /* ---------------------------------------------------------------- */
   /*  Audio / TTS                                                      */
